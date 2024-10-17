@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use std::mem::MaybeUninit;
+use std::os::unix::fs::MetadataExt;
 use std::str;
 use std::sync::mpsc::channel;
-use std::os::unix::fs::MetadataExt;
 
 use anyhow::bail;
 use anyhow::Result;
@@ -33,6 +33,8 @@ struct Command {
     pid: u32,
     #[arg(short, long, default_value = "")]
     cgroup: String,
+    #[arg(short, long)]
+    summary: bool,
 }
 
 fn bump_memlock_rlimit() -> Result<()> {
@@ -52,6 +54,116 @@ struct Process {
     pid: u32,
     stat: systing::types::task_stat,
     threads: Vec<Process>,
+}
+
+fn process_comm(process: &Process) -> Result<String> {
+    let comm = str::from_utf8(&process.stat.comm).unwrap().to_string();
+    if !comm.starts_with('\0') {
+        return Ok(comm);
+    }
+    let path = format!("/proc/{}/comm", process.pid);
+    let comm = std::fs::read_to_string(path);
+    if comm.is_err() {
+        return Ok("<unknown>".to_string());
+    }
+    Ok(comm.unwrap().trim().to_string())
+}
+
+fn dump_all_results(process_vec: Vec<Process>) -> Result<()> {
+    for process in process_vec.iter() {
+        let comm = process_comm(process)?;
+        let total_time: u64 = process.stat.run_time
+            + process.stat.preempt_time
+            + process.stat.queue_time
+            + process.stat.sleep_time
+            + process.stat.wait_time
+            + 1;
+
+        println!(
+            "{} pid {} runtime {}({}%) sleeptime {}({}%) waittime {}({}%) preempttime {}({}%) queuetime {}({}%)",
+            comm.trim(),
+            process.pid,
+            process.stat.run_time,
+            process.stat.run_time * 100 / total_time,
+            process.stat.sleep_time,
+            process.stat.sleep_time * 100 / total_time,
+            process.stat.wait_time,
+            process.stat.wait_time * 100 / total_time,
+            process.stat.preempt_time,
+            process.stat.preempt_time * 100 / total_time,
+            process.stat.queue_time,
+            process.stat.queue_time * 100 / total_time
+        );
+        for thread in process.threads.iter() {
+            let total_time: u64 = thread.stat.run_time
+                + thread.stat.preempt_time
+                + thread.stat.queue_time
+                + thread.stat.sleep_time
+                + thread.stat.wait_time
+                + 1;
+            println!(
+                "\t{} pid {} runtime {}({}%) sleeptime {}({}%) waittime {}({}%) preempttime {}({}%) queuetime {}({}%)",
+                comm.trim(),
+                thread.pid,
+                thread.stat.run_time,
+                thread.stat.run_time * 100 / total_time,
+                thread.stat.sleep_time,
+                thread.stat.sleep_time * 100 / total_time,
+                thread.stat.wait_time,
+                thread.stat.wait_time * 100 / total_time,
+                thread.stat.preempt_time,
+                thread.stat.preempt_time * 100 / total_time,
+                thread.stat.queue_time,
+                thread.stat.queue_time * 100 / total_time
+            );
+        }
+    }
+    Ok(())
+}
+
+fn summarize_results(process_vec: Vec<Process>) -> Result<()> {
+    for process in process_vec.iter() {
+        let mut total_time: u64 = process.stat.run_time
+            + process.stat.preempt_time
+            + process.stat.queue_time
+            + process.stat.sleep_time
+            + process.stat.wait_time;
+        let total_threads = process.threads.len();
+        let mut total_runtime = process.stat.run_time;
+        let mut total_sleep = process.stat.sleep_time;
+        let mut total_wait = process.stat.wait_time;
+        let mut total_preempt = process.stat.preempt_time;
+        let mut total_queue = process.stat.queue_time;
+        for thread in process.threads.iter() {
+            total_time += thread.stat.run_time
+                + thread.stat.preempt_time
+                + thread.stat.queue_time
+                + thread.stat.sleep_time
+                + thread.stat.wait_time;
+            total_runtime += thread.stat.run_time;
+            total_sleep += thread.stat.sleep_time;
+            total_wait += thread.stat.wait_time;
+            total_preempt += thread.stat.preempt_time;
+            total_queue += thread.stat.queue_time;
+        }
+        println!(
+            "{} pid {} threads {} runtime {}({}%) sleeptime {}({}%) waittime {}({}%) preempttime {}({}%) queuetime {}({}%)",
+            process_comm(process)?,
+            process.pid,
+            total_threads,
+            total_runtime,
+            total_runtime * 100 / total_time,
+            total_sleep,
+            total_sleep * 100 / total_time,
+            total_wait,
+            total_wait * 100 / total_time,
+            total_preempt,
+            total_preempt * 100 / total_time,
+            total_queue,
+            total_queue * 100 / total_time
+        );
+    }
+    Ok(())
 }
 
 fn main() -> Result<()> {
@@ -78,7 +190,9 @@ fn main() -> Result<()> {
     {
         let pid = (std::process::id() as u32).to_ne_bytes();
         let val = (1 as u8).to_ne_bytes();
-        skel.maps.ignore_pids.update(&pid, &val, libbpf_rs::MapFlags::ANY)?;
+        skel.maps
+            .ignore_pids
+            .update(&pid, &val, libbpf_rs::MapFlags::ANY)?;
     }
 
     skel.attach()?;
@@ -102,8 +216,7 @@ fn main() -> Result<()> {
             .lookup(&rawkey, libbpf_rs::MapFlags::ANY)
             .expect("Failed to get value")
             .expect("No value found");
-        let mut value: systing::types::task_stat =
-            systing::types::task_stat::default();
+        let mut value: systing::types::task_stat = systing::types::task_stat::default();
         plain::copy_from_bytes(&mut value, rawvalue.as_slice()).expect("Data buffer was too short");
 
         if pid == tgid && processes.contains_key(&pid) {
@@ -156,65 +269,18 @@ fn main() -> Result<()> {
         b_total.cmp(&a_total)
     });
 
-    for mut process in process_vec {
-        let mut comm = str::from_utf8(&process.stat.comm).unwrap();
-        let total_time: u64 = process.stat.run_time
-            + process.stat.preempt_time
-            + process.stat.queue_time
-            + process.stat.sleep_time
-            + process.stat.wait_time
-            + 1;
-
-        let proccomm;
-        if comm.starts_with('\0') {
-            let path = format!("/proc/{}/comm", process.pid);
-            proccomm = std::fs::read_to_string(path).unwrap_or("<unknown>".to_string());
-            comm = proccomm.as_str();
-        }
-
-        println!(
-            "{} pid {} runtime {}({}%) sleeptime {}({}%) waittime {}({}%) preempttime {}({}%) queuetime {}({}%)",
-            comm.trim(),
-            process.pid,
-            process.stat.run_time,
-            process.stat.run_time * 100 / total_time,
-            process.stat.sleep_time,
-            process.stat.sleep_time * 100 / total_time,
-            process.stat.wait_time,
-            process.stat.wait_time * 100 / total_time,
-            process.stat.preempt_time,
-            process.stat.preempt_time * 100 / total_time,
-            process.stat.queue_time,
-            process.stat.queue_time * 100 / total_time
-        );
+    for process in process_vec.iter_mut() {
         process.threads.sort_by(|a, b| {
             let a_total = a.stat.run_time + a.stat.preempt_time + a.stat.queue_time;
             let b_total = b.stat.run_time + b.stat.preempt_time + b.stat.queue_time;
             b_total.cmp(&a_total)
         });
-        for thread in process.threads {
-            let total_time: u64 = thread.stat.run_time
-                + thread.stat.preempt_time
-                + thread.stat.queue_time
-                + thread.stat.sleep_time
-                + thread.stat.wait_time
-                + 1;
-            println!(
-                "\t{} pid {} runtime {}({}%) sleeptime {}({}%) waittime {}({}%) preempttime {}({}%) queuetime {}({}%)",
-                comm.trim(),
-                thread.pid,
-                thread.stat.run_time,
-                thread.stat.run_time * 100 / total_time,
-                thread.stat.sleep_time,
-                thread.stat.sleep_time * 100 / total_time,
-                thread.stat.wait_time,
-                thread.stat.wait_time * 100 / total_time,
-                thread.stat.preempt_time,
-                thread.stat.preempt_time * 100 / total_time,
-                thread.stat.queue_time,
-                thread.stat.queue_time * 100 / total_time
-            );
-        }
+    }
+
+    if opts.summary {
+        summarize_results(process_vec)?;
+    } else {
+        dump_all_results(process_vec)?;
     }
     Ok(())
 }
