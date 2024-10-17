@@ -156,7 +156,7 @@ fn main() -> Result<()> {
         b_total.cmp(&a_total)
     });
 
-    for process in process_vec {
+    for mut process in process_vec {
         let mut comm = str::from_utf8(&process.stat.comm).unwrap();
         let total_time: u64 = process.stat.run_time
             + process.stat.preempt_time
@@ -187,6 +187,11 @@ fn main() -> Result<()> {
             process.stat.queue_time,
             process.stat.queue_time * 100 / total_time
         );
+        process.threads.sort_by(|a, b| {
+            let a_total = a.stat.run_time + a.stat.preempt_time + a.stat.queue_time;
+            let b_total = b.stat.run_time + b.stat.preempt_time + b.stat.queue_time;
+            b_total.cmp(&a_total)
+        });
         for thread in process.threads {
             let total_time: u64 = thread.stat.run_time
                 + thread.stat.preempt_time
