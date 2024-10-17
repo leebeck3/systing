@@ -1,0 +1,18 @@
+[package]
+name = "systing"
+version = "0.1.0"
+edition = "2021"
+authors = ["Josef Bacik <josef@toxicpanda.com>"]
+license = "MIT"
+description = "A libbpf based tracer to figure out what an application is doing"
+
+[build-dependencies]
+libbpf-cargo = "0.24"
+
+[dependencies]
+anyhow = "1.0"
+clap = { version = "4.5.20", features = ["derive"] }
+ctrlc = "3.4"
+libbpf-rs = "0.24"
+libc = "0.2"
+plain = "0.2"
