@@ -82,21 +82,26 @@ fn dump_all_results(process_vec: Vec<Process>) -> Result<()> {
             + process.stat.sleep_time
             + process.stat.wait_time
             + 1;
+        let total_potential_runtime =
+            process.stat.run_time + process.stat.preempt_time + process.stat.queue_time + 1;
 
         println!(
-            "{} pid {} runtime {}({}%) sleeptime {}({}%) waittime {}({}%) preempttime {}({}%) queuetime {}({}%)",
+            "{} pid {} runtime {}({}% total time, {}% runtime) sleeptime {}({}%) waittime {}({}%) preempttime {}({}% total time, {}% runtime) queuetime {}({}% total time, {}% runtime)",
             comm.trim(),
             process.pid,
             process.stat.run_time,
             process.stat.run_time * 100 / total_time,
+            process.stat.run_time * 100 / total_potential_runtime,
             process.stat.sleep_time,
             process.stat.sleep_time * 100 / total_time,
             process.stat.wait_time,
             process.stat.wait_time * 100 / total_time,
             process.stat.preempt_time,
             process.stat.preempt_time * 100 / total_time,
+            process.stat.preempt_time * 100 / total_potential_runtime,
             process.stat.queue_time,
-            process.stat.queue_time * 100 / total_time
+            process.stat.queue_time * 100 / total_time,
+            process.stat.queue_time * 100 / total_potential_runtime
         );
         for thread in process.threads.iter() {
             let total_time: u64 = thread.stat.run_time
@@ -105,20 +110,25 @@ fn dump_all_results(process_vec: Vec<Process>) -> Result<()> {
                 + thread.stat.sleep_time
                 + thread.stat.wait_time
                 + 1;
+            let total_potential_runtime =
+                thread.stat.run_time + thread.stat.preempt_time + thread.stat.queue_time + 1;
             println!(
-                "\t{} pid {} runtime {}({}%) sleeptime {}({}%) waittime {}({}%) preempttime {}({}%) queuetime {}({}%)",
+                "\t{} pid {} runtime {}({}% total time, {}% runtime) sleeptime {}({}%) waittime {}({}%) preempttime {}({}% total time, {}% runtime) queuetime {}({}% total time, {}% runtime)",
                 comm.trim(),
                 thread.pid,
                 thread.stat.run_time,
                 thread.stat.run_time * 100 / total_time,
+                thread.stat.run_time * 100 / total_potential_runtime,
                 thread.stat.sleep_time,
                 thread.stat.sleep_time * 100 / total_time,
                 thread.stat.wait_time,
                 thread.stat.wait_time * 100 / total_time,
                 thread.stat.preempt_time,
                 thread.stat.preempt_time * 100 / total_time,
+                thread.stat.preempt_time * 100 / total_potential_runtime,
                 thread.stat.queue_time,
-                thread.stat.queue_time * 100 / total_time
+                thread.stat.queue_time * 100 / total_time,
+                thread.stat.queue_time * 100 / total_potential_runtime
             );
         }
     }
@@ -138,6 +148,9 @@ fn summarize_results(process_vec: Vec<Process>) -> Result<()> {
         let mut total_wait = process.stat.wait_time;
         let mut total_preempt = process.stat.preempt_time;
         let mut total_queue = process.stat.queue_time;
+        let mut total_potential_runtime =
+            process.stat.run_time + process.stat.preempt_time + process.stat.queue_time;
+
         for thread in process.threads.iter() {
             total_time += thread.stat.run_time
                 + thread.stat.preempt_time
@@ -149,22 +162,27 @@ fn summarize_results(process_vec: Vec<Process>) -> Result<()> {
             total_wait += thread.stat.wait_time;
             total_preempt += thread.stat.preempt_time;
             total_queue += thread.stat.queue_time;
+            total_potential_runtime +=
+                thread.stat.run_time + thread.stat.preempt_time + thread.stat.queue_time;
         }
         println!(
-            "{} pid {} threads {} runtime {}({}%) sleeptime {}({}%) waittime {}({}%) preempttime {}({}%) queuetime {}({}%)",
+            "{} pid {} threads {} runtime {}({}% total time, {}% runtime) sleeptime {}({}%) waittime {}({}%) preempttime {}({}% total time, {}% runtime) queuetime {}({}% total time, {}% runtime)",
             process_comm(process)?,
             process.pid,
             total_threads,
             total_runtime,
             total_runtime * 100 / total_time,
+            total_runtime * 100 / total_potential_runtime,
             total_sleep,
             total_sleep * 100 / total_time,
             total_wait,
             total_wait * 100 / total_time,
             total_preempt,
             total_preempt * 100 / total_time,
+            total_preempt * 100 / total_potential_runtime,
             total_queue,
-            total_queue * 100 / total_time
+            total_queue * 100 / total_time,
+            total_queue * 100 / total_potential_runtime
         );
     }
     Ok(())
