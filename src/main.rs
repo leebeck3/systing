@@ -173,7 +173,7 @@ fn main() -> Result<()> {
         }
 
         println!(
-            "comm {} pid {} runtime {}({}%) sleeptime {}({}%) waittime {}({}%) preempttime {}({}%) queuetime {}({}%)",
+            "{} pid {} runtime {}({}%) sleeptime {}({}%) waittime {}({}%) preempttime {}({}%) queuetime {}({}%)",
             comm.trim(),
             process.pid,
             process.stat.run_time,
@@ -200,7 +200,7 @@ fn main() -> Result<()> {
                 + thread.stat.wait_time
                 + 1;
             println!(
-                "\tcomm {} pid {} runtime {}({}%) sleeptime {}({}%) waittime {}({}%) preempttime {}({}%) queuetime {}({}%)",
+                "\t{} pid {} runtime {}({}%) sleeptime {}({}%) waittime {}({}%) preempttime {}({}%) queuetime {}({}%)",
                 comm.trim(),
                 thread.pid,
                 thread.stat.run_time,
