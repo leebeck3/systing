@@ -3,6 +3,8 @@ use std::mem::MaybeUninit;
 use std::os::unix::fs::MetadataExt;
 use std::str;
 use std::sync::mpsc::channel;
+use std::thread;
+use std::time::Duration;
 
 use anyhow::bail;
 use anyhow::Result;
@@ -35,6 +37,8 @@ struct Command {
     cgroup: String,
     #[arg(short, long)]
     summary: bool,
+    #[arg(short, long, default_value = "0")]
+    duration: u64,
 }
 
 fn bump_memlock_rlimit() -> Result<()> {
@@ -197,12 +201,15 @@ fn main() -> Result<()> {
 
     skel.attach()?;
 
-    let (tx, rx) = channel();
-    ctrlc::set_handler(move || tx.send(()).expect("Could not send signal on channel."))
-        .expect("Error setting Ctrl-C handler");
-
-    println!("Press Ctrl-C to stop");
-    rx.recv().expect("Could not receive signal on channel.");
+    if opts.duration > 0 {
+        thread::sleep(Duration::from_secs(opts.duration));
+    } else {
+        let (tx, rx) = channel();
+        ctrlc::set_handler(move || tx.send(()).expect("Could not send signal on channel."))
+            .expect("Error setting Ctrl-C handler");
+        println!("Press Ctrl-C to stop");
+        rx.recv().expect("Could not receive signal on channel.");
+    }
 
     let mut processes = HashMap::new();
     for rawkey in skel.maps.stats.keys() {
