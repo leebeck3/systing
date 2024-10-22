@@ -3,6 +3,7 @@ use std::mem::MaybeUninit;
 use std::os::unix::fs::MetadataExt;
 use std::str;
 use std::sync::mpsc::channel;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -14,6 +15,8 @@ use libbpf_rs::skel::OpenSkel;
 use libbpf_rs::skel::Skel;
 use libbpf_rs::skel::SkelBuilder;
 use libbpf_rs::MapCore;
+use libbpf_rs::RingBufferBuilder;
+
 use plain::Plain;
 
 mod systing {
@@ -26,6 +29,7 @@ mod systing {
 use systing::*;
 
 unsafe impl Plain for systing::types::task_stat {}
+unsafe impl Plain for systing::types::preempt_event {}
 
 #[derive(Debug, Parser)]
 struct Command {
@@ -54,18 +58,26 @@ fn bump_memlock_rlimit() -> Result<()> {
     Ok(())
 }
 
+struct PreemptEvent {
+    preempt_pid: u32,
+    preempt_tgid: u32,
+    cgid: u64,
+    comm: String,
+    count: u64,
+}
+
 struct Process {
     pid: u32,
     stat: systing::types::task_stat,
     threads: Vec<Process>,
+    preempt_events: Vec<PreemptEvent>,
 }
 
-fn process_comm(process: &Process) -> Result<String> {
-    let comm = str::from_utf8(&process.stat.comm).unwrap().to_string();
+fn process_comm(pid: u32, comm: String) -> Result<String> {
     if !comm.starts_with('\0') {
         return Ok(comm);
     }
-    let path = format!("/proc/{}/comm", process.pid);
+    let path = format!("/proc/{}/comm", pid);
     let comm = std::fs::read_to_string(path);
     if comm.is_err() {
         return Ok("<unknown>".to_string());
@@ -75,7 +87,10 @@ fn process_comm(process: &Process) -> Result<String> {
 
 fn dump_all_results(process_vec: Vec<Process>) -> Result<()> {
     for process in process_vec.iter() {
-        let comm = process_comm(process)?;
+        let comm = process_comm(
+            process.pid,
+            str::from_utf8(&process.stat.comm).unwrap().to_string(),
+        )?;
         let total_time: u64 = process.stat.run_time
             + process.stat.preempt_time
             + process.stat.queue_time
@@ -86,9 +101,10 @@ fn dump_all_results(process_vec: Vec<Process>) -> Result<()> {
             process.stat.run_time + process.stat.preempt_time + process.stat.queue_time + 1;
 
         println!(
-            "{} pid {} runtime {}({}% total time, {}% runtime) sleeptime {}({}%) waittime {}({}%) preempttime {}({}% total time, {}% runtime) queuetime {}({}% total time, {}% runtime)",
+            "{} pid {} cgid {} runtime {}({}% total time, {}% runtime) sleeptime {}({}%) waittime {}({}%) preempttime {}({}% total time, {}% runtime) queuetime {}({}% total time, {}% runtime)",
             comm.trim(),
             process.pid,
+            process.stat.cgid,
             process.stat.run_time,
             process.stat.run_time * 100 / total_time,
             process.stat.run_time * 100 / total_potential_runtime,
@@ -103,6 +119,13 @@ fn dump_all_results(process_vec: Vec<Process>) -> Result<()> {
             process.stat.queue_time * 100 / total_time,
             process.stat.queue_time * 100 / total_potential_runtime
         );
+
+        for pevent in process.preempt_events.iter() {
+            println!(
+                "  Preempted by {} pid {} tgid {} cgid {} times {}",
+                pevent.comm, pevent.preempt_pid, pevent.preempt_tgid, pevent.cgid, pevent.count
+            );
+        }
         for thread in process.threads.iter() {
             let total_time: u64 = thread.stat.run_time
                 + thread.stat.preempt_time
@@ -113,9 +136,10 @@ fn dump_all_results(process_vec: Vec<Process>) -> Result<()> {
             let total_potential_runtime =
                 thread.stat.run_time + thread.stat.preempt_time + thread.stat.queue_time + 1;
             println!(
-                "\t{} pid {} runtime {}({}% total time, {}% runtime) sleeptime {}({}%) waittime {}({}%) preempttime {}({}% total time, {}% runtime) queuetime {}({}% total time, {}% runtime)",
+                "\t{} pid {} cgid {} runtime {}({}% total time, {}% runtime) sleeptime {}({}%) waittime {}({}%) preempttime {}({}% total time, {}% runtime) queuetime {}({}% total time, {}% runtime)",
                 comm.trim(),
                 thread.pid,
+                thread.stat.cgid,
                 thread.stat.run_time,
                 thread.stat.run_time * 100 / total_time,
                 thread.stat.run_time * 100 / total_potential_runtime,
@@ -130,6 +154,12 @@ fn dump_all_results(process_vec: Vec<Process>) -> Result<()> {
                 thread.stat.queue_time * 100 / total_time,
                 thread.stat.queue_time * 100 / total_potential_runtime
             );
+            for pevent in thread.preempt_events.iter() {
+                println!(
+                    "\t  Preempted by {} pid {} tgid {} cgid {} times {}",
+                    pevent.comm, pevent.preempt_pid, pevent.preempt_tgid, pevent.cgid, pevent.count
+                );
+            }
         }
     }
     Ok(())
@@ -150,6 +180,7 @@ fn summarize_results(process_vec: Vec<Process>) -> Result<()> {
         let mut total_queue = process.stat.queue_time;
         let mut total_potential_runtime =
             process.stat.run_time + process.stat.preempt_time + process.stat.queue_time;
+        let mut pevents = Vec::new();
 
         for thread in process.threads.iter() {
             total_time += thread.stat.run_time
@@ -164,10 +195,13 @@ fn summarize_results(process_vec: Vec<Process>) -> Result<()> {
             total_queue += thread.stat.queue_time;
             total_potential_runtime +=
                 thread.stat.run_time + thread.stat.preempt_time + thread.stat.queue_time;
+            pevents.extend(&thread.preempt_events);
         }
+        pevents.extend(&process.preempt_events);
+
         println!(
             "{} pid {} threads {} runtime {}({}% total time, {}% runtime) sleeptime {}({}%) waittime {}({}%) preempttime {}({}% total time, {}% runtime) queuetime {}({}% total time, {}% runtime)",
-            process_comm(process)?,
+            process_comm(process.pid, str::from_utf8(&process.stat.comm).unwrap().to_string())?,
             process.pid,
             total_threads,
             total_runtime,
@@ -184,6 +218,16 @@ fn summarize_results(process_vec: Vec<Process>) -> Result<()> {
             total_queue * 100 / total_time,
             total_queue * 100 / total_potential_runtime
         );
+        pevents.sort_by(|a, b| b.count.cmp(&a.count));
+        for pevent in pevents.iter() {
+            println!(
+                "\tPreempted by {} pid {} tgid {} times {}",
+                process_comm(pevent.preempt_pid, pevent.comm.clone())?,
+                pevent.preempt_pid,
+                pevent.preempt_tgid,
+                pevent.count
+            );
+        }
     }
     Ok(())
 }
@@ -219,6 +263,37 @@ fn main() -> Result<()> {
 
     skel.attach()?;
 
+    // Start the ring buffer, start a thread to poll for the events and add them to the
+    // preempt_events vector.
+    let preempt_events = Arc::new(Mutex::new(Vec::new()));
+    let preempt_clone = Arc::clone(&preempt_events);
+    let thread_done = Arc::new(Mutex::new(false));
+    let thread_done_clone = Arc::clone(&thread_done);
+    let mut builder = RingBufferBuilder::new();
+    builder
+        .add(&skel.maps.events, move |data: &[u8]| {
+            let mut event = systing::types::preempt_event::default();
+            plain::copy_from_bytes(&mut event, data).expect("Data buffer was too short");
+            preempt_clone.lock().unwrap().push(event);
+            0
+        })
+        .expect("Failed to add ring buffer");
+    let ring = builder.build().expect("Failed to build ring buffer");
+
+    let t = thread::spawn(move || -> i32 {
+        loop {
+            let res = ring.poll(Duration::from_millis(100));
+            if res.is_err() {
+                break;
+            }
+            if *thread_done_clone.lock().unwrap() {
+                break;
+            }
+        }
+        0
+    });
+
+    // Wait for the duration to expire or for a Ctrl-C signal.
     if opts.duration > 0 {
         thread::sleep(Duration::from_secs(opts.duration));
     } else {
@@ -228,6 +303,10 @@ fn main() -> Result<()> {
         println!("Press Ctrl-C to stop");
         rx.recv().expect("Could not receive signal on channel.");
     }
+
+    println!("Stopping");
+    *thread_done.lock().unwrap() = true;
+    t.join().expect("Failed to join thread");
 
     let mut processes = HashMap::new();
     for rawkey in skel.maps.stats.keys() {
@@ -255,6 +334,7 @@ fn main() -> Result<()> {
                 pid,
                 stat: value,
                 threads: Vec::new(),
+                preempt_events: Vec::new(),
             };
 
             processes.insert(pid, process);
@@ -266,6 +346,7 @@ fn main() -> Result<()> {
                 pid: tgid,
                 stat: systing::types::task_stat::default(),
                 threads: Vec::new(),
+                preempt_events: Vec::new(),
             };
 
             processes.insert(tgid, process);
@@ -274,9 +355,73 @@ fn main() -> Result<()> {
             pid,
             stat: value,
             threads: Vec::new(),
+            preempt_events: Vec::new(),
         };
         let leader = processes.get_mut(&tgid).unwrap();
         leader.threads.push(process);
+    }
+
+    // Now we need to go through the preempt events and add them to the process or thread.
+    for event in preempt_events.lock().unwrap().iter() {
+        let pid = event.tgidpid as u32;
+        let tgid: u32 = (event.tgidpid >> 32) as u32;
+        let preempt_pid = event.preempt_tgidpid as u32;
+        let preempt_tgid: u32 = (event.preempt_tgidpid >> 32) as u32;
+
+        if !processes.contains_key(&tgid) {
+            continue;
+        }
+
+        let process = processes.get_mut(&tgid).unwrap();
+
+        if pid == tgid {
+            let mut found = false;
+            for pevent in process.preempt_events.iter_mut() {
+                if pevent.preempt_pid == preempt_pid {
+                    pevent.count += 1;
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                process.preempt_events.push(PreemptEvent {
+                    preempt_pid,
+                    preempt_tgid,
+                    comm: process_comm(
+                        preempt_pid,
+                        str::from_utf8(&event.comm).unwrap().to_string(),
+                    )?,
+                    cgid: event.cgid,
+                    count: 1,
+                });
+            }
+        } else {
+            for thread in process.threads.iter_mut() {
+                if thread.pid == pid {
+                    let mut found = false;
+                    for pevent in thread.preempt_events.iter_mut() {
+                        if pevent.preempt_pid == preempt_pid {
+                            pevent.count += 1;
+                            found = true;
+                            break;
+                        }
+                    }
+
+                    if !found {
+                        thread.preempt_events.push(PreemptEvent {
+                            preempt_pid,
+                            preempt_tgid,
+                            comm: process_comm(
+                                preempt_pid,
+                                str::from_utf8(&event.comm).unwrap().to_string(),
+                            )?,
+                            cgid: event.cgid,
+                            count: 1,
+                        });
+                    }
+                }
+            }
+        }
     }
 
     let mut process_vec: Vec<Process> = processes.into_iter().map(|(_, v)| v).collect();
@@ -300,6 +445,10 @@ fn main() -> Result<()> {
             let b_total = b.stat.run_time + b.stat.preempt_time + b.stat.queue_time;
             b_total.cmp(&a_total)
         });
+        process.preempt_events.sort_by(|a, b| b.count.cmp(&a.count));
+        for thread in process.threads.iter_mut() {
+            thread.preempt_events.sort_by(|a, b| b.count.cmp(&a.count));
+        }
     }
 
     if opts.summary {

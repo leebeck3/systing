@@ -31,12 +31,26 @@ struct task_state_value {
 
 struct task_stat {
 	u8 comm[TASK_COMM_LEN];
+	u64 cgid;
 	u64 sleep_time;
 	u64 preempt_time;
 	u64 run_time;
 	u64 wait_time;
 	u64 queue_time;
 };
+
+struct preempt_event {
+	u8 comm[TASK_COMM_LEN];
+	u64 tgidpid;
+	u64 preempt_tgidpid;
+	u64 cgid;
+};
+
+/*
+ * Dummy instance to get skeleton to generate definition for
+ * `struct preempt_event`
+ */
+struct preempt_event _event = {0};
 
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
@@ -59,6 +73,18 @@ struct {
 	__uint(max_entries, 10240);
 } ignore_pids SEC(".maps");
 
+struct {
+	__uint(type, BPF_MAP_TYPE_RINGBUF);
+	__uint(max_entries, 10 * 1024 * 1024 /* 10Mib */);
+} events SEC(".maps");
+
+static __always_inline
+u64 task_cg_id(struct task_struct *task)
+{
+	struct cgroup *cgrp = task->cgroups->dfl_cgrp;
+	return cgrp->kn->id;
+}
+
 static __always_inline
 int trace_enqueue(struct task_struct *tsk, u32 state, bool preempt)
 {
@@ -70,7 +96,7 @@ int trace_enqueue(struct task_struct *tsk, u32 state, bool preempt)
 		return 0;
 	if (tool_config.tgid && tsk->tgid != tool_config.tgid)
 		return 0;
-	if (tool_config.cgroupid && tsk->cgroups->dfl_cgrp->kn->id != tool_config.cgroupid)
+	if (tool_config.cgroupid && task_cg_id(tsk) != tool_config.cgroupid)
 		return 0;
 	value.ts = bpf_ktime_get_ns();
 	value.state = state;
@@ -94,6 +120,7 @@ void update_counter(struct task_struct *task, u64 delta, enum stat_type type)
 		stat = bpf_map_lookup_elem(&stats, &key);
 		if (!stat)
 			return;
+		stat->cgid = task_cg_id(task);
 		bpf_probe_read_kernel_str(stat->comm, sizeof(stat->comm),
 					  task->comm);
 	}
@@ -173,6 +200,20 @@ int handle__sched_switch(u64 *ctx)
 		update_counter(prev, delta, STAT_RUN_TIME);
 	}
 	trace_enqueue(prev, prev_state, prev_state == TASK_RUNNING);
+
+	if (prev_state == TASK_RUNNING && next->tgid != 0) {
+		struct preempt_event *e;
+
+		e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
+		if (e) {
+			e->tgidpid = (u64)prev->tgid << 32 | prev->pid;
+			e->cgid = task_cg_id(next);
+			e->preempt_tgidpid = (u64)next->tgid << 32 | next->pid;
+			bpf_probe_read_kernel_str(e->comm, sizeof(e->comm),
+						  next->comm);
+			bpf_ringbuf_submit(e, 0);
+		}
+	}
 
 	key = (u64)next->tgid << 32 | next->pid;
 	value = bpf_map_lookup_elem(&start, &key);
