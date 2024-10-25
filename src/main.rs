@@ -1,7 +1,7 @@
 use std::collections::HashMap;
+use std::ffi::CStr;
 use std::mem::MaybeUninit;
 use std::os::unix::fs::MetadataExt;
-use std::str;
 use std::sync::mpsc::channel;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -73,10 +73,7 @@ struct Process {
     preempt_events: Vec<PreemptEvent>,
 }
 
-fn process_comm(pid: u32, comm: String) -> Result<String> {
-    if !comm.starts_with('\0') {
-        return Ok(comm);
-    }
+fn pid_comm(pid: u32) -> Result<String> {
     let path = format!("/proc/{}/comm", pid);
     let comm = std::fs::read_to_string(path);
     if comm.is_err() {
@@ -85,14 +82,25 @@ fn process_comm(pid: u32, comm: String) -> Result<String> {
     Ok(comm.unwrap().trim().to_string())
 }
 
+fn preempt_event_comm(event: &systing::types::preempt_event) -> Result<String> {
+    let comm_cstr = CStr::from_bytes_until_nul(&event.comm).unwrap();
+    if comm_cstr.to_bytes().starts_with(&[0]) {
+        return pid_comm(event.preempt_tgidpid as u32);
+    }
+    Ok(comm_cstr.to_string_lossy().to_string())
+}
+
+fn process_comm(process: &Process) -> Result<String> {
+    let comm_cstr = CStr::from_bytes_until_nul(&process.stat.comm).unwrap();
+    if comm_cstr.to_bytes().starts_with(&[0]) {
+        return pid_comm(process.pid);
+    }
+    Ok(comm_cstr.to_string_lossy().to_string())
+}
+
 fn dump_all_results(process_vec: Vec<Process>) -> Result<()> {
     for process in process_vec.iter() {
-        let comm = process_comm(
-            process.pid,
-            str::from_utf8(&process.stat.comm)
-                .unwrap_or("\0")
-                .to_string(),
-        )?;
+        let comm = process_comm(process)?;
         let total_time: u64 = process.stat.run_time
             + process.stat.preempt_time
             + process.stat.queue_time
@@ -241,7 +249,7 @@ fn summarize_results(process_vec: Vec<Process>) -> Result<()> {
 
         println!(
             "{} pid {} threads {} runtime {}({}% total time, {}% runtime) sleeptime {}({}%) waittime {}({}%) preempttime {}({}% total time, {}% runtime) queuetime {}({}% total time, {}% runtime) irq time {}({}% total time, {}% runtime) softirq time {}({}% total time, {}% runtime)",
-            process_comm(process.pid, str::from_utf8(&process.stat.comm).unwrap_or("\0").to_string())?,
+            process_comm(process)?,
             process.pid,
             total_threads,
             total_runtime,
@@ -268,10 +276,7 @@ fn summarize_results(process_vec: Vec<Process>) -> Result<()> {
         for pevent in pevents.iter() {
             println!(
                 "\tPreempted by {} pid {} tgid {} times {}",
-                process_comm(pevent.preempt_pid, pevent.comm.clone())?,
-                pevent.preempt_pid,
-                pevent.preempt_tgid,
-                pevent.count
+                pevent.comm, pevent.preempt_pid, pevent.preempt_tgid, pevent.count
             );
         }
     }
@@ -433,10 +438,7 @@ fn main() -> Result<()> {
                 process.preempt_events.push(PreemptEvent {
                     preempt_pid,
                     preempt_tgid,
-                    comm: process_comm(
-                        preempt_pid,
-                        str::from_utf8(&event.comm).unwrap_or("\0").to_string(),
-                    )?,
+                    comm: preempt_event_comm(event)?,
                     cgid: event.cgid,
                     count: 1,
                 });
@@ -457,10 +459,7 @@ fn main() -> Result<()> {
                         thread.preempt_events.push(PreemptEvent {
                             preempt_pid,
                             preempt_tgid,
-                            comm: process_comm(
-                                preempt_pid,
-                                str::from_utf8(&event.comm).unwrap_or("\0").to_string(),
-                            )?,
+                            comm: preempt_event_comm(event)?,
                             cgid: event.cgid,
                             count: 1,
                         });
