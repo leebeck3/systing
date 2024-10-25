@@ -89,7 +89,9 @@ fn dump_all_results(process_vec: Vec<Process>) -> Result<()> {
     for process in process_vec.iter() {
         let comm = process_comm(
             process.pid,
-            str::from_utf8(&process.stat.comm).unwrap().to_string(),
+            str::from_utf8(&process.stat.comm)
+                .unwrap_or("\0")
+                .to_string(),
         )?;
         let total_time: u64 = process.stat.run_time
             + process.stat.preempt_time
@@ -239,7 +241,7 @@ fn summarize_results(process_vec: Vec<Process>) -> Result<()> {
 
         println!(
             "{} pid {} threads {} runtime {}({}% total time, {}% runtime) sleeptime {}({}%) waittime {}({}%) preempttime {}({}% total time, {}% runtime) queuetime {}({}% total time, {}% runtime) irq time {}({}% total time, {}% runtime) softirq time {}({}% total time, {}% runtime)",
-            process_comm(process.pid, str::from_utf8(&process.stat.comm).unwrap().to_string())?,
+            process_comm(process.pid, str::from_utf8(&process.stat.comm).unwrap_or("\0").to_string())?,
             process.pid,
             total_threads,
             total_runtime,
@@ -433,7 +435,7 @@ fn main() -> Result<()> {
                     preempt_tgid,
                     comm: process_comm(
                         preempt_pid,
-                        str::from_utf8(&event.comm).unwrap().to_string(),
+                        str::from_utf8(&event.comm).unwrap_or("\0").to_string(),
                     )?,
                     cgid: event.cgid,
                     count: 1,
@@ -457,7 +459,7 @@ fn main() -> Result<()> {
                             preempt_tgid,
                             comm: process_comm(
                                 preempt_pid,
-                                str::from_utf8(&event.comm).unwrap().to_string(),
+                                str::from_utf8(&event.comm).unwrap_or("\0").to_string(),
                             )?,
                             cgid: event.cgid,
                             count: 1,
