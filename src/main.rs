@@ -96,12 +96,18 @@ fn dump_all_results(process_vec: Vec<Process>) -> Result<()> {
             + process.stat.queue_time
             + process.stat.sleep_time
             + process.stat.wait_time
+            + process.stat.irq_time
+            + process.stat.softirq_time
             + 1;
-        let total_potential_runtime =
-            process.stat.run_time + process.stat.preempt_time + process.stat.queue_time + 1;
+        let total_potential_runtime = process.stat.run_time
+            + process.stat.preempt_time
+            + process.stat.queue_time
+            + process.stat.irq_time
+            + process.stat.softirq_time
+            + 1;
 
         println!(
-            "{} pid {} cgid {} runtime {}({}% total time, {}% runtime) sleeptime {}({}%) waittime {}({}%) preempttime {}({}% total time, {}% runtime) queuetime {}({}% total time, {}% runtime)",
+            "{} pid {} cgid {} runtime {}({}% total time, {}% runtime) sleeptime {}({}%) waittime {}({}%) preempttime {}({}% total time, {}% runtime) queuetime {}({}% total time, {}% runtime) irq time {}({}% total time, {}% runtime) softirq time {}({}% total time, {}% runtime)",
             comm.trim(),
             process.pid,
             process.stat.cgid,
@@ -117,7 +123,13 @@ fn dump_all_results(process_vec: Vec<Process>) -> Result<()> {
             process.stat.preempt_time * 100 / total_potential_runtime,
             process.stat.queue_time,
             process.stat.queue_time * 100 / total_time,
-            process.stat.queue_time * 100 / total_potential_runtime
+            process.stat.queue_time * 100 / total_potential_runtime,
+            process.stat.irq_time,
+            process.stat.irq_time * 100 / total_time,
+            process.stat.irq_time * 100 / total_potential_runtime,
+            process.stat.softirq_time,
+            process.stat.softirq_time * 100 / total_time,
+            process.stat.softirq_time * 100 / total_potential_runtime
         );
 
         for pevent in process.preempt_events.iter() {
@@ -132,11 +144,17 @@ fn dump_all_results(process_vec: Vec<Process>) -> Result<()> {
                 + thread.stat.queue_time
                 + thread.stat.sleep_time
                 + thread.stat.wait_time
+                + thread.stat.irq_time
+                + thread.stat.softirq_time
                 + 1;
-            let total_potential_runtime =
-                thread.stat.run_time + thread.stat.preempt_time + thread.stat.queue_time + 1;
+            let total_potential_runtime = thread.stat.run_time
+                + thread.stat.preempt_time
+                + thread.stat.queue_time
+                + thread.stat.irq_time
+                + thread.stat.softirq_time
+                + 1;
             println!(
-                "\t{} pid {} cgid {} runtime {}({}% total time, {}% runtime) sleeptime {}({}%) waittime {}({}%) preempttime {}({}% total time, {}% runtime) queuetime {}({}% total time, {}% runtime)",
+                "\t{} pid {} cgid {} runtime {}({}% total time, {}% runtime) sleeptime {}({}%) waittime {}({}%) preempttime {}({}% total time, {}% runtime) queuetime {}({}% total time, {}% runtime) irq time {}({}% total time, {}% runtime) softirq time {}({}% total time, {}% runtime)",
                 comm.trim(),
                 thread.pid,
                 thread.stat.cgid,
@@ -152,7 +170,13 @@ fn dump_all_results(process_vec: Vec<Process>) -> Result<()> {
                 thread.stat.preempt_time * 100 / total_potential_runtime,
                 thread.stat.queue_time,
                 thread.stat.queue_time * 100 / total_time,
-                thread.stat.queue_time * 100 / total_potential_runtime
+                thread.stat.queue_time * 100 / total_potential_runtime,
+                thread.stat.irq_time,
+                thread.stat.irq_time * 100 / total_time,
+                thread.stat.irq_time * 100 / total_potential_runtime,
+                thread.stat.softirq_time,
+                thread.stat.softirq_time * 100 / total_time,
+                thread.stat.softirq_time * 100 / total_potential_runtime
             );
             for pevent in thread.preempt_events.iter() {
                 println!(
@@ -171,15 +195,22 @@ fn summarize_results(process_vec: Vec<Process>) -> Result<()> {
             + process.stat.preempt_time
             + process.stat.queue_time
             + process.stat.sleep_time
-            + process.stat.wait_time;
+            + process.stat.wait_time
+            + process.stat.irq_time
+            + process.stat.softirq_time;
         let total_threads = process.threads.len();
         let mut total_runtime = process.stat.run_time;
         let mut total_sleep = process.stat.sleep_time;
         let mut total_wait = process.stat.wait_time;
         let mut total_preempt = process.stat.preempt_time;
         let mut total_queue = process.stat.queue_time;
-        let mut total_potential_runtime =
-            process.stat.run_time + process.stat.preempt_time + process.stat.queue_time;
+        let mut total_irq = process.stat.irq_time;
+        let mut total_softirq = process.stat.softirq_time;
+        let mut total_potential_runtime = process.stat.run_time
+            + process.stat.preempt_time
+            + process.stat.queue_time
+            + process.stat.irq_time
+            + process.stat.softirq_time;
         let mut pevents = Vec::new();
 
         for thread in process.threads.iter() {
@@ -187,20 +218,27 @@ fn summarize_results(process_vec: Vec<Process>) -> Result<()> {
                 + thread.stat.preempt_time
                 + thread.stat.queue_time
                 + thread.stat.sleep_time
-                + thread.stat.wait_time;
+                + thread.stat.wait_time
+                + thread.stat.irq_time
+                + thread.stat.softirq_time;
             total_runtime += thread.stat.run_time;
             total_sleep += thread.stat.sleep_time;
             total_wait += thread.stat.wait_time;
             total_preempt += thread.stat.preempt_time;
             total_queue += thread.stat.queue_time;
-            total_potential_runtime +=
-                thread.stat.run_time + thread.stat.preempt_time + thread.stat.queue_time;
+            total_irq += thread.stat.irq_time;
+            total_softirq += thread.stat.softirq_time;
+            total_potential_runtime += thread.stat.run_time
+                + thread.stat.preempt_time
+                + thread.stat.queue_time
+                + thread.stat.irq_time
+                + thread.stat.softirq_time;
             pevents.extend(&thread.preempt_events);
         }
         pevents.extend(&process.preempt_events);
 
         println!(
-            "{} pid {} threads {} runtime {}({}% total time, {}% runtime) sleeptime {}({}%) waittime {}({}%) preempttime {}({}% total time, {}% runtime) queuetime {}({}% total time, {}% runtime)",
+            "{} pid {} threads {} runtime {}({}% total time, {}% runtime) sleeptime {}({}%) waittime {}({}%) preempttime {}({}% total time, {}% runtime) queuetime {}({}% total time, {}% runtime) irq time {}({}% total time, {}% runtime) softirq time {}({}% total time, {}% runtime)",
             process_comm(process.pid, str::from_utf8(&process.stat.comm).unwrap().to_string())?,
             process.pid,
             total_threads,
@@ -216,7 +254,13 @@ fn summarize_results(process_vec: Vec<Process>) -> Result<()> {
             total_preempt * 100 / total_potential_runtime,
             total_queue,
             total_queue * 100 / total_time,
-            total_queue * 100 / total_potential_runtime
+            total_queue * 100 / total_potential_runtime,
+            total_irq,
+            total_irq * 100 / total_time,
+            total_irq * 100 / total_potential_runtime,
+            total_softirq,
+            total_softirq * 100 / total_time,
+            total_softirq * 100 / total_potential_runtime
         );
         pevents.sort_by(|a, b| b.count.cmp(&a.count));
         for pevent in pevents.iter() {

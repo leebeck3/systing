@@ -20,6 +20,8 @@ enum stat_type {
 	STAT_RUN_TIME,
 	STAT_WAIT_TIME,
 	STAT_QUEUE_TIME,
+	STAT_IRQ_TIME,
+	STAT_SOFTIRQ_TIME,
 	STAT_MAX,
 };
 
@@ -37,6 +39,8 @@ struct task_stat {
 	u64 run_time;
 	u64 wait_time;
 	u64 queue_time;
+	u64 irq_time;
+	u64 softirq_time;
 };
 
 struct preempt_event {
@@ -72,6 +76,13 @@ struct {
 	__type(value, u8);
 	__uint(max_entries, 10240);
 } ignore_pids SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__type(key, u64);
+	__type(value, u64);
+	__uint(max_entries, 10240);
+} irq_events SEC(".maps");
 
 struct {
 	__uint(type, BPF_MAP_TYPE_RINGBUF);
@@ -141,9 +152,52 @@ void update_counter(struct task_struct *task, u64 delta, enum stat_type type)
 	case STAT_QUEUE_TIME:
 		__sync_fetch_and_add(&stat->queue_time, delta);
 		break;
+	case STAT_IRQ_TIME:
+		__sync_fetch_and_add(&stat->irq_time, delta);
+		break;
+	case STAT_SOFTIRQ_TIME:
+		__sync_fetch_and_add(&stat->softirq_time, delta);
+		break;
 	default:
 		break;
 	}
+}
+
+
+static __always_inline
+int trace_irq_enter(void)
+{
+	struct task_struct *tsk = (struct task_struct *)bpf_get_current_task_btf();
+	u64 key = (u64)tsk->tgid << 32 | tsk->pid;
+	u64 start;
+	u32 tgid = tsk->tgid;
+
+	if (bpf_map_lookup_elem(&ignore_pids, &tgid))
+		return 0;
+	if (tool_config.tgid && tsk->tgid != tool_config.tgid)
+		return 0;
+	if (tool_config.cgroupid && task_cg_id(tsk) != tool_config.cgroupid)
+		return 0;
+	start = bpf_ktime_get_ns();
+	bpf_map_update_elem(&irq_events, &key, &start, BPF_ANY);
+	return 0;
+}
+
+static __always_inline
+int trace_irq_exit(bool softirq)
+{
+	struct task_struct *tsk = (struct task_struct *)bpf_get_current_task_btf();
+	struct task_stat *stat;
+	u64 *start_ns;
+	u64 key = (u64)tsk->tgid << 32 | tsk->pid;
+	u64 delta;
+
+	start_ns = bpf_map_lookup_elem(&irq_events, &key);
+	if (!start_ns)
+		return 0;
+	update_counter(tsk, 0, softirq ? STAT_SOFTIRQ_TIME : STAT_IRQ_TIME);
+	bpf_map_delete_elem(&irq_events, &key);
+	return 0;
 }
 
 SEC("tp_btf/sched_wakeup")
@@ -226,6 +280,34 @@ int handle__sched_switch(u64 *ctx)
 	}
 	trace_enqueue(next, next_state, false);
 	return 0;
+}
+
+SEC("tp_btf/irq_handler_entry")
+int handle__irq_handler_entry(u64 *ctx)
+{
+	/* TP_PROTO(int irq, struct irqaction *action) */
+	return trace_irq_enter();
+}
+
+SEC("tp_btf/irq_handler_exit")
+int handle__irq_handler_exit(u64 *ctx)
+{
+	/* TP_PROTO(int irq, struct irqaction *action, int ret) */
+	return trace_irq_exit(false);
+}
+
+SEC("tp_btf/softirq_entry")
+int handle__softirq_entry(u64 *ctx)
+{
+	/* TP_PROTO(unsigned int vec_nr) */
+	return trace_irq_enter();
+}
+
+SEC("tp_btf/softirq_exit")
+int handle__softirq_exit(u64 *ctx)
+{
+	/* TP_PROTO(unsigned int vec_nr) */
+	return trace_irq_exit(true);
 }
 
 char LICENSE[] SEC("license") = "GPL";
