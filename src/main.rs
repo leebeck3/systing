@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::ffi::CStr;
 use std::mem::MaybeUninit;
 use std::os::unix::fs::MetadataExt;
 use std::sync::mpsc::channel;
@@ -16,7 +15,6 @@ use libbpf_rs::skel::Skel;
 use libbpf_rs::skel::SkelBuilder;
 use libbpf_rs::MapCore;
 use libbpf_rs::RingBufferBuilder;
-
 use plain::Plain;
 
 mod systing {
@@ -26,6 +24,8 @@ mod systing {
     ));
 }
 
+mod process;
+use process::Process;
 use systing::*;
 
 unsafe impl Plain for systing::types::task_stat {}
@@ -58,49 +58,8 @@ fn bump_memlock_rlimit() -> Result<()> {
     Ok(())
 }
 
-struct PreemptEvent {
-    preempt_pid: u32,
-    preempt_tgid: u32,
-    cgid: u64,
-    comm: String,
-    count: u64,
-}
-
-struct Process {
-    pid: u32,
-    stat: systing::types::task_stat,
-    threads: Vec<Process>,
-    preempt_events: Vec<PreemptEvent>,
-}
-
-fn pid_comm(pid: u32) -> Result<String> {
-    let path = format!("/proc/{}/comm", pid);
-    let comm = std::fs::read_to_string(path);
-    if comm.is_err() {
-        return Ok("<unknown>".to_string());
-    }
-    Ok(comm.unwrap().trim().to_string())
-}
-
-fn preempt_event_comm(event: &systing::types::preempt_event) -> Result<String> {
-    let comm_cstr = CStr::from_bytes_until_nul(&event.comm).unwrap();
-    if comm_cstr.to_bytes().starts_with(&[0]) {
-        return pid_comm(event.preempt_tgidpid as u32);
-    }
-    Ok(comm_cstr.to_string_lossy().to_string())
-}
-
-fn process_comm(process: &Process) -> Result<String> {
-    let comm_cstr = CStr::from_bytes_until_nul(&process.stat.comm).unwrap();
-    if comm_cstr.to_bytes().starts_with(&[0]) {
-        return pid_comm(process.pid);
-    }
-    Ok(comm_cstr.to_string_lossy().to_string())
-}
-
 fn dump_all_results(process_vec: Vec<Process>) -> Result<()> {
     for process in process_vec.iter() {
-        let comm = process_comm(process)?;
         let total_time: u64 = process.stat.run_time
             + process.stat.preempt_time
             + process.stat.queue_time
@@ -118,7 +77,7 @@ fn dump_all_results(process_vec: Vec<Process>) -> Result<()> {
 
         println!(
             "{} pid {} cgid {} runtime {}({}% total time, {}% runtime) sleeptime {}({}%) waittime {}({}%) preempttime {}({}% total time, {}% runtime) queuetime {}({}% total time, {}% runtime) irq time {}({}% total time, {}% runtime) softirq time {}({}% total time, {}% runtime)",
-            comm.trim(),
+            process.comm,
             process.pid,
             process.stat.cgid,
             process.stat.run_time,
@@ -165,7 +124,7 @@ fn dump_all_results(process_vec: Vec<Process>) -> Result<()> {
                 + 1;
             println!(
                 "\t{} pid {} cgid {} runtime {}({}% total time, {}% runtime) sleeptime {}({}%) waittime {}({}%) preempttime {}({}% total time, {}% runtime) queuetime {}({}% total time, {}% runtime) irq time {}({}% total time, {}% runtime) softirq time {}({}% total time, {}% runtime)",
-                comm.trim(),
+                thread.comm,
                 thread.pid,
                 thread.stat.cgid,
                 thread.stat.run_time,
@@ -249,7 +208,7 @@ fn summarize_results(process_vec: Vec<Process>) -> Result<()> {
 
         println!(
             "{} pid {} threads {} runtime {}({}% total time, {}% runtime) sleeptime {}({}%) waittime {}({}%) preempttime {}({}% total time, {}% runtime) queuetime {}({}% total time, {}% runtime) irq time {}({}% total time, {}% runtime) softirq time {}({}% total time, {}% runtime)",
-            process_comm(process)?,
+            process.comm,
             process.pid,
             total_threads,
             total_runtime,
@@ -360,6 +319,7 @@ fn main() -> Result<()> {
     t.join().expect("Failed to join thread");
 
     let mut processes = HashMap::new();
+    let mut threads: HashMap<u32, Vec<Process>> = HashMap::new();
     for rawkey in skel.maps.stats.keys() {
         let mut key: u64 = 0;
         plain::copy_from_bytes(&mut key, &rawkey).expect("Data buffer was too short");
@@ -374,98 +334,52 @@ fn main() -> Result<()> {
         let mut value: systing::types::task_stat = systing::types::task_stat::default();
         plain::copy_from_bytes(&mut value, rawvalue.as_slice()).expect("Data buffer was too short");
 
-        if pid == tgid && processes.contains_key(&pid) {
-            // We found a thread before the process, so we need to update the process.
-            let process: &mut Process = processes.get_mut(&pid).unwrap();
-            process.stat = value;
-            continue;
-        } else if pid == tgid {
+        if pid == tgid {
             // This is the tg leader, insert it and carry on.
-            let process = Process {
-                pid,
-                stat: value,
-                threads: Vec::new(),
-                preempt_events: Vec::new(),
-            };
+            let mut process = Process::new(pid, value);
 
+            // If we found threads before we found the process we need to add them to our process
+            // now.
+            match threads.remove(&pid) {
+                Some(mut thread_vec) => loop {
+                    match thread_vec.pop() {
+                        Some(thread) => {
+                            process.add_thread(thread);
+                        }
+                        None => break,
+                    }
+                },
+                None => {}
+            }
             processes.insert(pid, process);
-            continue;
-        } else if !processes.contains_key(&tgid) {
-            // We found a thread before the process, so we need to create a blank process to update
-            // later.
-            let process = Process {
-                pid: tgid,
-                stat: systing::types::task_stat::default(),
-                threads: Vec::new(),
-                preempt_events: Vec::new(),
-            };
-
-            processes.insert(tgid, process);
+        } else {
+            let process = Process::new(pid, value);
+            match processes.get_mut(&tgid) {
+                Some(leader) => {
+                    leader.add_thread(process);
+                }
+                None => match threads.get_mut(&tgid) {
+                    Some(thread_vec) => {
+                        thread_vec.push(process);
+                    }
+                    None => {
+                        let mut thread_vec: Vec<Process> = Vec::new();
+                        thread_vec.push(process);
+                        threads.insert(tgid, thread_vec);
+                    }
+                },
+            }
         }
-        let process = Process {
-            pid,
-            stat: value,
-            threads: Vec::new(),
-            preempt_events: Vec::new(),
-        };
-        let leader = processes.get_mut(&tgid).unwrap();
-        leader.threads.push(process);
     }
 
     // Now we need to go through the preempt events and add them to the process or thread.
     for event in preempt_events.lock().unwrap().iter() {
-        let pid = event.tgidpid as u32;
         let tgid: u32 = (event.tgidpid >> 32) as u32;
-        let preempt_pid = event.preempt_tgidpid as u32;
-        let preempt_tgid: u32 = (event.preempt_tgidpid >> 32) as u32;
-
-        if !processes.contains_key(&tgid) {
-            continue;
-        }
-
-        let process = processes.get_mut(&tgid).unwrap();
-
-        if pid == tgid {
-            let mut found = false;
-            for pevent in process.preempt_events.iter_mut() {
-                if pevent.preempt_pid == preempt_pid {
-                    pevent.count += 1;
-                    found = true;
-                    break;
-                }
+        match processes.get_mut(&tgid) {
+            Some(process) => {
+                process.add_preempt_event(event);
             }
-            if !found {
-                process.preempt_events.push(PreemptEvent {
-                    preempt_pid,
-                    preempt_tgid,
-                    comm: preempt_event_comm(event)?,
-                    cgid: event.cgid,
-                    count: 1,
-                });
-            }
-        } else {
-            for thread in process.threads.iter_mut() {
-                if thread.pid == pid {
-                    let mut found = false;
-                    for pevent in thread.preempt_events.iter_mut() {
-                        if pevent.preempt_pid == preempt_pid {
-                            pevent.count += 1;
-                            found = true;
-                            break;
-                        }
-                    }
-
-                    if !found {
-                        thread.preempt_events.push(PreemptEvent {
-                            preempt_pid,
-                            preempt_tgid,
-                            comm: preempt_event_comm(event)?,
-                            cgid: event.cgid,
-                            count: 1,
-                        });
-                    }
-                }
-            }
+            None => {}
         }
     }
 
