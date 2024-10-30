@@ -195,7 +195,7 @@ int trace_irq_exit(bool softirq)
 	start_ns = bpf_map_lookup_elem(&irq_events, &key);
 	if (!start_ns)
 		return 0;
-	update_counter(tsk, 0, softirq ? STAT_SOFTIRQ_TIME : STAT_IRQ_TIME);
+	update_counter(tsk, delta, softirq ? STAT_SOFTIRQ_TIME : STAT_IRQ_TIME);
 	bpf_map_delete_elem(&irq_events, &key);
 	return 0;
 }
