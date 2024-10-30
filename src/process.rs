@@ -155,7 +155,7 @@ impl Process {
                 "Run Time: {}({}% total time, {}% runtime)",
                 self.stat.run_time,
                 self.stat.run_time * 100 / self.process_time(),
-                self.stat.run_time * 100 / self.total_potential_runtime()
+                self.stat.run_time * 100 / self.potential_runtime()
             ),
             ProcessStat::SleepTime => format!(
                 "Sleep Time: {}({}%)",
