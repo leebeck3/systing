@@ -1,6 +1,7 @@
 use std::ffi::CStr;
 
 use crate::systing;
+use strum_macros::EnumIter;
 
 fn pid_comm(pid: u32) -> String {
     let path = format!("/proc/{}/comm", pid);
@@ -9,6 +10,28 @@ fn pid_comm(pid: u32) -> String {
         return "<unknown>".to_string();
     }
     comm.unwrap().trim().to_string()
+}
+
+#[derive(EnumIter, Debug)]
+pub enum ProcessStat {
+    RunTime,
+    SleepTime,
+    WaitTime,
+    PreemptTime,
+    QueueTime,
+    IrqTime,
+    SoftirqTime,
+}
+
+#[derive(EnumIter, Debug)]
+pub enum TotalProcessStat {
+    TotalRunTime,
+    TotalSleepTime,
+    TotalWaitTime,
+    TotalPreemptTime,
+    TotalQueueTime,
+    TotalIrqTime,
+    TotalSoftirqTime,
 }
 
 pub struct PreemptEvent {
@@ -22,23 +45,93 @@ pub struct PreemptEvent {
 pub struct Process {
     pub pid: u32,
     pub comm: String,
+    pub cgid: u64,
     pub stat: systing::types::task_stat,
     pub threads: Vec<Process>,
     pub preempt_events: Vec<PreemptEvent>,
+    total_runtime: u64,
+    total_sleep_time: u64,
+    total_wait_time: u64,
+    total_preempt_time: u64,
+    total_queue_time: u64,
+    total_irq_time: u64,
+    total_softirq_time: u64,
+    time: u64,
+    potential_runtime: u64,
+    total_time: u64,
+    total_potential_runtime: u64,
 }
 
 impl Process {
     pub fn new(pid: u32, stat: systing::types::task_stat) -> Self {
+        let mytime = stat.run_time
+            + stat.preempt_time
+            + stat.queue_time
+            + stat.irq_time
+            + stat.softirq_time
+            + stat.sleep_time
+            + stat.wait_time;
+        let mypotential_runtime =
+            stat.run_time + stat.preempt_time + stat.queue_time + stat.irq_time + stat.softirq_time;
         Process {
             pid,
             comm: Process::get_comm(pid, stat),
+            cgid: stat.cgid,
             stat,
             threads: Vec::new(),
             preempt_events: Vec::new(),
+            time: mytime,
+            potential_runtime: mypotential_runtime,
+            total_time: mytime,
+            total_potential_runtime: mypotential_runtime,
+            total_runtime: stat.run_time,
+            total_sleep_time: stat.sleep_time,
+            total_wait_time: stat.wait_time,
+            total_preempt_time: stat.preempt_time,
+            total_queue_time: stat.queue_time,
+            total_irq_time: stat.irq_time,
+            total_softirq_time: stat.softirq_time,
+        }
+    }
+
+    pub fn process_time(&self) -> u64 {
+        match self.time {
+            0 => 1,
+            _ => self.time,
+        }
+    }
+
+    pub fn potential_runtime(&self) -> u64 {
+        match self.potential_runtime {
+            0 => 1,
+            _ => self.potential_runtime,
+        }
+    }
+
+    pub fn total_time(&self) -> u64 {
+        match self.total_time {
+            0 => 1,
+            _ => self.total_time,
+        }
+    }
+
+    pub fn total_potential_runtime(&self) -> u64 {
+        match self.total_potential_runtime {
+            0 => 1,
+            _ => self.total_potential_runtime,
         }
     }
 
     pub fn add_thread(&mut self, thread: Process) {
+        self.total_time += thread.time;
+        self.total_potential_runtime += thread.potential_runtime;
+        self.total_runtime += thread.stat.run_time;
+        self.total_sleep_time += thread.stat.sleep_time;
+        self.total_wait_time += thread.stat.wait_time;
+        self.total_preempt_time += thread.stat.preempt_time;
+        self.total_queue_time += thread.stat.queue_time;
+        self.total_irq_time += thread.stat.irq_time;
+        self.total_softirq_time += thread.stat.softirq_time;
         self.threads.push(thread);
     }
 
@@ -53,6 +146,96 @@ impl Process {
                     return;
                 }
             }
+        }
+    }
+
+    pub fn stat_str(&self, stat: ProcessStat) -> String {
+        match stat {
+            ProcessStat::RunTime => format!(
+                "Run Time: {}({}% total time, {}% runtime)",
+                self.stat.run_time,
+                self.stat.run_time * 100 / self.process_time(),
+                self.stat.run_time * 100 / self.total_potential_runtime()
+            ),
+            ProcessStat::SleepTime => format!(
+                "Sleep Time: {}({}%)",
+                self.stat.sleep_time,
+                self.stat.sleep_time * 100 / self.process_time()
+            ),
+            ProcessStat::WaitTime => format!(
+                "Wait Time: {}({}%)",
+                self.stat.wait_time,
+                self.stat.wait_time * 100 / self.process_time()
+            ),
+            ProcessStat::PreemptTime => format!(
+                "Preempt Time: {}({}% total time, {}% runtime)",
+                self.stat.preempt_time,
+                self.stat.preempt_time * 100 / self.process_time(),
+                self.stat.preempt_time * 100 / self.potential_runtime()
+            ),
+            ProcessStat::QueueTime => format!(
+                "Queue Time: {}({}% total time, {}% runtime)",
+                self.stat.queue_time,
+                self.stat.queue_time * 100 / self.process_time(),
+                self.stat.queue_time * 100 / self.potential_runtime()
+            ),
+            ProcessStat::IrqTime => format!(
+                "IRQ Time: {}({}% total time, {}% runtime)",
+                self.stat.irq_time,
+                self.stat.irq_time * 100 / self.process_time(),
+                self.stat.irq_time * 100 / self.potential_runtime()
+            ),
+            ProcessStat::SoftirqTime => format!(
+                "SoftIRQ Time: {}({}% total time, {}% runtime)",
+                self.stat.softirq_time,
+                self.stat.softirq_time * 100 / self.process_time(),
+                self.stat.softirq_time * 100 / self.potential_runtime()
+            ),
+        }
+    }
+
+    pub fn total_stat_str(&self, stat: TotalProcessStat) -> String {
+        match stat {
+            TotalProcessStat::TotalRunTime => format!(
+                "Total Run Time: {}({}% total time, {}% runtime)",
+                self.total_runtime,
+                self.total_runtime * 100 / self.total_time(),
+                self.total_runtime * 100 / self.total_potential_runtime()
+            ),
+            TotalProcessStat::TotalSleepTime => format!(
+                "Total Sleep Time: {}({}%)",
+                self.total_sleep_time,
+                self.total_sleep_time * 100 / self.total_time()
+            ),
+            TotalProcessStat::TotalWaitTime => format!(
+                "Total Wait Time: {}({}%)",
+                self.total_wait_time,
+                self.total_wait_time * 100 / self.total_time()
+            ),
+            TotalProcessStat::TotalPreemptTime => format!(
+                "Total Preempt Time: {}({}% total time, {}% runtime)",
+                self.total_preempt_time,
+                self.total_preempt_time * 100 / self.total_time(),
+                self.total_preempt_time * 100 / self.total_potential_runtime()
+            ),
+            TotalProcessStat::TotalQueueTime => format!(
+                "Total Queue Time: {}({}% total time, {}% runtime)",
+                self.total_queue_time,
+                self.total_queue_time * 100 / self.total_time(),
+                self.total_queue_time * 100 / self.total_potential_runtime()
+            ),
+            TotalProcessStat::TotalIrqTime => format!(
+                "Total IRQ Time: {}({}% total time, {}% runtime)",
+                self.total_irq_time,
+                self.total_irq_time * 100 / self.total_time(),
+                self.total_irq_time * 100 / self.total_potential_runtime()
+            ),
+            TotalProcessStat::TotalSoftirqTime => format!(
+                "Total SoftIRQ Time: {}({}% total time, {}% runtime)",
+                self.total_softirq_time,
+                self.total_softirq_time * 100 / self.total_time(),
+                self.total_softirq_time * 100 / self.total_potential_runtime()
+            ),
         }
     }
 

@@ -16,6 +16,7 @@ use libbpf_rs::skel::SkelBuilder;
 use libbpf_rs::MapCore;
 use libbpf_rs::RingBufferBuilder;
 use plain::Plain;
+use strum::IntoEnumIterator;
 
 mod systing {
     include!(concat!(
@@ -25,7 +26,8 @@ mod systing {
 }
 
 mod process;
-use process::Process;
+mod tree_view;
+use process::{Process, ProcessStat, TotalProcessStat};
 use systing::*;
 
 unsafe impl Plain for systing::types::task_stat {}
@@ -41,6 +43,8 @@ struct Command {
     cgroup: String,
     #[arg(short, long)]
     summary: bool,
+    #[arg(short, long)]
+    tui: bool,
     #[arg(short, long, default_value = "0")]
     duration: u64,
 }
@@ -60,46 +64,12 @@ fn bump_memlock_rlimit() -> Result<()> {
 
 fn dump_all_results(process_vec: Vec<Process>) -> Result<()> {
     for process in process_vec.iter() {
-        let total_time: u64 = process.stat.run_time
-            + process.stat.preempt_time
-            + process.stat.queue_time
-            + process.stat.sleep_time
-            + process.stat.wait_time
-            + process.stat.irq_time
-            + process.stat.softirq_time
-            + 1;
-        let total_potential_runtime = process.stat.run_time
-            + process.stat.preempt_time
-            + process.stat.queue_time
-            + process.stat.irq_time
-            + process.stat.softirq_time
-            + 1;
+        print!("{} pid {} cgid {}", process.comm, process.pid, process.cgid);
+        for stat in ProcessStat::iter() {
+            print!(" {}", process.stat_str(stat));
+        }
 
-        println!(
-            "{} pid {} cgid {} runtime {}({}% total time, {}% runtime) sleeptime {}({}%) waittime {}({}%) preempttime {}({}% total time, {}% runtime) queuetime {}({}% total time, {}% runtime) irq time {}({}% total time, {}% runtime) softirq time {}({}% total time, {}% runtime)",
-            process.comm,
-            process.pid,
-            process.stat.cgid,
-            process.stat.run_time,
-            process.stat.run_time * 100 / total_time,
-            process.stat.run_time * 100 / total_potential_runtime,
-            process.stat.sleep_time,
-            process.stat.sleep_time * 100 / total_time,
-            process.stat.wait_time,
-            process.stat.wait_time * 100 / total_time,
-            process.stat.preempt_time,
-            process.stat.preempt_time * 100 / total_time,
-            process.stat.preempt_time * 100 / total_potential_runtime,
-            process.stat.queue_time,
-            process.stat.queue_time * 100 / total_time,
-            process.stat.queue_time * 100 / total_potential_runtime,
-            process.stat.irq_time,
-            process.stat.irq_time * 100 / total_time,
-            process.stat.irq_time * 100 / total_potential_runtime,
-            process.stat.softirq_time,
-            process.stat.softirq_time * 100 / total_time,
-            process.stat.softirq_time * 100 / total_potential_runtime
-        );
+        println!("");
 
         for pevent in process.preempt_events.iter() {
             println!(
@@ -108,45 +78,12 @@ fn dump_all_results(process_vec: Vec<Process>) -> Result<()> {
             );
         }
         for thread in process.threads.iter() {
-            let total_time: u64 = thread.stat.run_time
-                + thread.stat.preempt_time
-                + thread.stat.queue_time
-                + thread.stat.sleep_time
-                + thread.stat.wait_time
-                + thread.stat.irq_time
-                + thread.stat.softirq_time
-                + 1;
-            let total_potential_runtime = thread.stat.run_time
-                + thread.stat.preempt_time
-                + thread.stat.queue_time
-                + thread.stat.irq_time
-                + thread.stat.softirq_time
-                + 1;
-            println!(
-                "\t{} pid {} cgid {} runtime {}({}% total time, {}% runtime) sleeptime {}({}%) waittime {}({}%) preempttime {}({}% total time, {}% runtime) queuetime {}({}% total time, {}% runtime) irq time {}({}% total time, {}% runtime) softirq time {}({}% total time, {}% runtime)",
-                thread.comm,
-                thread.pid,
-                thread.stat.cgid,
-                thread.stat.run_time,
-                thread.stat.run_time * 100 / total_time,
-                thread.stat.run_time * 100 / total_potential_runtime,
-                thread.stat.sleep_time,
-                thread.stat.sleep_time * 100 / total_time,
-                thread.stat.wait_time,
-                thread.stat.wait_time * 100 / total_time,
-                thread.stat.preempt_time,
-                thread.stat.preempt_time * 100 / total_time,
-                thread.stat.preempt_time * 100 / total_potential_runtime,
-                thread.stat.queue_time,
-                thread.stat.queue_time * 100 / total_time,
-                thread.stat.queue_time * 100 / total_potential_runtime,
-                thread.stat.irq_time,
-                thread.stat.irq_time * 100 / total_time,
-                thread.stat.irq_time * 100 / total_potential_runtime,
-                thread.stat.softirq_time,
-                thread.stat.softirq_time * 100 / total_time,
-                thread.stat.softirq_time * 100 / total_potential_runtime
-            );
+            print!("\t{} pid {} cgid {}", thread.comm, thread.pid, thread.cgid);
+
+            for stat in ProcessStat::iter() {
+                print!(" {}", thread.stat_str(stat));
+            }
+            println!("");
             for pevent in thread.preempt_events.iter() {
                 println!(
                     "\t  Preempted by {} pid {} tgid {} cgid {} times {}",
@@ -160,77 +97,22 @@ fn dump_all_results(process_vec: Vec<Process>) -> Result<()> {
 
 fn summarize_results(process_vec: Vec<Process>) -> Result<()> {
     for process in process_vec.iter() {
-        let mut total_time: u64 = process.stat.run_time
-            + process.stat.preempt_time
-            + process.stat.queue_time
-            + process.stat.sleep_time
-            + process.stat.wait_time
-            + process.stat.irq_time
-            + process.stat.softirq_time;
         let total_threads = process.threads.len();
-        let mut total_runtime = process.stat.run_time;
-        let mut total_sleep = process.stat.sleep_time;
-        let mut total_wait = process.stat.wait_time;
-        let mut total_preempt = process.stat.preempt_time;
-        let mut total_queue = process.stat.queue_time;
-        let mut total_irq = process.stat.irq_time;
-        let mut total_softirq = process.stat.softirq_time;
-        let mut total_potential_runtime = process.stat.run_time
-            + process.stat.preempt_time
-            + process.stat.queue_time
-            + process.stat.irq_time
-            + process.stat.softirq_time;
         let mut pevents = Vec::new();
 
         for thread in process.threads.iter() {
-            total_time += thread.stat.run_time
-                + thread.stat.preempt_time
-                + thread.stat.queue_time
-                + thread.stat.sleep_time
-                + thread.stat.wait_time
-                + thread.stat.irq_time
-                + thread.stat.softirq_time;
-            total_runtime += thread.stat.run_time;
-            total_sleep += thread.stat.sleep_time;
-            total_wait += thread.stat.wait_time;
-            total_preempt += thread.stat.preempt_time;
-            total_queue += thread.stat.queue_time;
-            total_irq += thread.stat.irq_time;
-            total_softirq += thread.stat.softirq_time;
-            total_potential_runtime += thread.stat.run_time
-                + thread.stat.preempt_time
-                + thread.stat.queue_time
-                + thread.stat.irq_time
-                + thread.stat.softirq_time;
             pevents.extend(&thread.preempt_events);
         }
         pevents.extend(&process.preempt_events);
 
-        println!(
-            "{} pid {} threads {} runtime {}({}% total time, {}% runtime) sleeptime {}({}%) waittime {}({}%) preempttime {}({}% total time, {}% runtime) queuetime {}({}% total time, {}% runtime) irq time {}({}% total time, {}% runtime) softirq time {}({}% total time, {}% runtime)",
-            process.comm,
-            process.pid,
-            total_threads,
-            total_runtime,
-            total_runtime * 100 / total_time,
-            total_runtime * 100 / total_potential_runtime,
-            total_sleep,
-            total_sleep * 100 / total_time,
-            total_wait,
-            total_wait * 100 / total_time,
-            total_preempt,
-            total_preempt * 100 / total_time,
-            total_preempt * 100 / total_potential_runtime,
-            total_queue,
-            total_queue * 100 / total_time,
-            total_queue * 100 / total_potential_runtime,
-            total_irq,
-            total_irq * 100 / total_time,
-            total_irq * 100 / total_potential_runtime,
-            total_softirq,
-            total_softirq * 100 / total_time,
-            total_softirq * 100 / total_potential_runtime
+        print!(
+            "{} pid {} cgid {} threads {}",
+            process.comm, process.pid, process.cgid, total_threads
         );
+        for stat in TotalProcessStat::iter() {
+            print!(" {}", process.total_stat_str(stat));
+        }
+        println!("");
         pevents.sort_by(|a, b| b.count.cmp(&a.count));
         for pevent in pevents.iter() {
             println!(
@@ -410,7 +292,9 @@ fn main() -> Result<()> {
         }
     }
 
-    if opts.summary {
+    if opts.tui {
+        tree_view::launch_tui(process_vec);
+    } else if opts.summary {
         summarize_results(process_vec)?;
     } else {
         dump_all_results(process_vec)?;
