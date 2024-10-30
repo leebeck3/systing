@@ -99,7 +99,10 @@ impl Model {
             for stat in ProcessStat::iter() {
                 pnode.add_child(Node::new(newkey(&mut key), p.stat_str(stat)));
             }
-            let mut threads_node = Node::new(newkey(&mut key), "Threads".to_string());
+            let mut threads_node = Node::new(
+                newkey(&mut key),
+                format!("Threads: {}", p.threads.len()).to_string(),
+            );
             for thread in p.threads.iter() {
                 let mut tnode = Node::new(newkey(&mut key), thread.comm.clone());
                 tnode.add_child(Node::new(
@@ -114,20 +117,26 @@ impl Model {
                     tnode.add_child(Node::new(newkey(&mut key), thread.stat_str(stat)));
                 }
                 if thread.preempt_events.len() > 0 {
-                    let mut pevents = Node::new(newkey(&mut key), "Preempt Events".to_string());
+                    let mut pevents = Node::new(
+                        newkey(&mut key),
+                        format!("Preempt Events: {}", thread.preempt_events.len()).to_string(),
+                    );
                     for pevent in thread.preempt_events.iter() {
-                        let mut pevent_node = Node::new(newkey(&mut key), pevent.comm.clone());
+                        let mut pevent_node = Node::new(
+                            newkey(&mut key),
+                            format!("{}: {}", pevent.comm, pevent.count).to_string(),
+                        );
                         pevent_node.add_child(Node::new(
                             newkey(&mut key),
-                            format!("Preempted by: {}", pevent.preempt_pid).to_string(),
+                            format!("Pid: {}", pevent.preempt_pid).to_string(),
                         ));
                         pevent_node.add_child(Node::new(
                             newkey(&mut key),
-                            format!("Preempted by TGID: {}", pevent.preempt_tgid).to_string(),
+                            format!("Tgid: {}", pevent.preempt_tgid).to_string(),
                         ));
                         pevent_node.add_child(Node::new(
                             newkey(&mut key),
-                            format!("Preempted by CGID: {}", pevent.cgid).to_string(),
+                            format!("Cgroup ID: {}", pevent.cgid).to_string(),
                         ));
                         pevent_node.add_child(Node::new(
                             newkey(&mut key),
@@ -143,20 +152,26 @@ impl Model {
                 pnode.add_child(threads_node);
             }
 
-            let mut pevents = Node::new(newkey(&mut key), "Preempt Events".to_string());
+            let mut pevents = Node::new(
+                newkey(&mut key),
+                format!("Preempt Events: {}", p.preempt_events.len()).to_string(),
+            );
             for pevent in p.preempt_events.iter() {
-                let mut pevent_node = Node::new(newkey(&mut key), pevent.comm.clone());
+                let mut pevent_node = Node::new(
+                    newkey(&mut key),
+                    format!("{}: {}", pevent.comm, pevent.count).to_string(),
+                );
                 pevent_node.add_child(Node::new(
                     newkey(&mut key),
-                    format!("Preempted by: {}", pevent.preempt_pid).to_string(),
+                    format!("Pid: {}", pevent.preempt_pid).to_string(),
                 ));
                 pevent_node.add_child(Node::new(
                     newkey(&mut key),
-                    format!("Preempted by TGID: {}", pevent.preempt_tgid).to_string(),
+                    format!("Tgid: {}", pevent.preempt_tgid).to_string(),
                 ));
                 pevent_node.add_child(Node::new(
                     newkey(&mut key),
-                    format!("Preempted by CGID: {}", pevent.cgid).to_string(),
+                    format!("Cgid: {}", pevent.cgid).to_string(),
                 ));
                 pevent_node.add_child(Node::new(
                     newkey(&mut key),
