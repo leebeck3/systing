@@ -159,7 +159,7 @@ fn collect_results(
 
         if pid == tgid {
             // This is the tg leader, insert it and carry on.
-            let mut process = Process::new(pid, value);
+            let mut process = Process::with_event(pid, value);
 
             // If we found threads before we found the process we need to add them to our process
             // now.
@@ -176,7 +176,7 @@ fn collect_results(
             }
             processes.insert(pid, process);
         } else {
-            let process = Process::new(pid, value);
+            let process = Process::with_event(pid, value);
             match processes.get_mut(&tgid) {
                 Some(leader) => {
                     leader.add_thread(process);
@@ -191,6 +191,27 @@ fn collect_results(
                         threads.insert(tgid, thread_vec);
                     }
                 },
+            }
+        }
+    }
+
+    // We may have never seen the process leader, so go through the threads hashmap and create a
+    // process for the leader.
+    for (tgid, thread_vec) in threads {
+        match processes.get_mut(&tgid) {
+            // Shouldn't happened, but *waves hand at the code*, we all know I don't know what I'm
+            // doing.
+            Some(leader) => {
+                for thread in thread_vec {
+                    leader.add_thread(thread);
+                }
+            }
+            None => {
+                let mut process = Process::new(tgid);
+                for thread in thread_vec {
+                    process.add_thread(thread);
+                }
+                processes.insert(tgid, process);
             }
         }
     }

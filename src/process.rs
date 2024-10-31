@@ -69,7 +69,29 @@ pub struct Run {
 }
 
 impl Process {
-    pub fn new(pid: u32, stat: systing::types::task_stat) -> Self {
+    pub fn new(pid: u32) -> Self {
+        Process {
+            pid,
+            comm: pid_comm(pid),
+            cgid: 0,
+            stat: systing::types::task_stat::default(),
+            threads: Vec::new(),
+            preempt_events: Vec::new(),
+            total_runtime: 0,
+            total_sleep_time: 0,
+            total_wait_time: 0,
+            total_preempt_time: 0,
+            total_queue_time: 0,
+            total_irq_time: 0,
+            total_softirq_time: 0,
+            time: 0,
+            potential_runtime: 0,
+            total_time: 0,
+            total_potential_runtime: 0,
+        }
+    }
+
+    pub fn with_event(pid: u32, stat: systing::types::task_stat) -> Self {
         let mytime = stat.run_time
             + stat.preempt_time
             + stat.queue_time
