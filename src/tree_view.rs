@@ -13,7 +13,7 @@ use tuirealm::{
     SubEventClause, Update,
 };
 
-use crate::process::{Process, ProcessStat, Run};
+use crate::process::{Process, ProcessStat, Run, TotalProcessStat};
 
 #[derive(Debug, PartialEq)]
 pub enum Msg {
@@ -50,8 +50,17 @@ impl Model {
         app.mount(
             Id::ProcessTree,
             Box::new(ProcessTree::new(
-                Tree::new(Self::processes_to_nodes(&runsvec.first().unwrap().processes)),
-                format!("Run {}", runsvec.first().unwrap().start_time.format("%Y-%m-%d %H:%M:%S")),
+                Tree::new(Self::processes_to_nodes(
+                    &runsvec.first().unwrap().processes,
+                )),
+                format!(
+                    "Run {}",
+                    runsvec
+                        .first()
+                        .unwrap()
+                        .start_time
+                        .format("%Y-%m-%d %H:%M:%S")
+                ),
             )),
             vec![],
         )
@@ -98,9 +107,19 @@ impl Model {
                 newkey(&mut key),
                 format!("Cgroup ID: {}", p.stat.cgid).to_string(),
             ));
+
+            let mut pstat = Node::new(newkey(&mut key), "Process Stats".to_string());
             for stat in ProcessStat::iter() {
-                pnode.add_child(Node::new(newkey(&mut key), p.stat_str(stat)));
+                pstat.add_child(Node::new(newkey(&mut key), p.stat_str(stat)));
             }
+            pnode.add_child(pstat);
+
+            let mut pstat = Node::new(newkey(&mut key), "Total Stats".to_string());
+            for stat in TotalProcessStat::iter() {
+                pstat.add_child(Node::new(newkey(&mut key), p.total_stat_str(stat)));
+            }
+            pnode.add_child(pstat);
+
             let mut threads_node = Node::new(
                 newkey(&mut key),
                 format!("Threads: {}", p.threads.len()).to_string(),
