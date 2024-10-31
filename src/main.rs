@@ -229,23 +229,15 @@ fn collect_results(
 
     let mut process_vec: Vec<Process> = processes.into_iter().map(|(_, v)| v).collect();
     process_vec.sort_by(|a, b| {
-        let mut a_total = a.stat.run_time + a.stat.preempt_time + a.stat.queue_time;
-        let mut b_total = b.stat.run_time + b.stat.preempt_time + b.stat.queue_time;
-
-        for thread in a.threads.iter() {
-            a_total += thread.stat.run_time + thread.stat.preempt_time + thread.stat.queue_time;
-        }
-
-        for thread in b.threads.iter() {
-            b_total += thread.stat.run_time + thread.stat.preempt_time + thread.stat.queue_time;
-        }
+        let a_total = a.total_potential_runtime();
+        let b_total = b.total_potential_runtime();
         b_total.cmp(&a_total)
     });
 
     for process in process_vec.iter_mut() {
         process.threads.sort_by(|a, b| {
-            let a_total = a.stat.run_time + a.stat.preempt_time + a.stat.queue_time;
-            let b_total = b.stat.run_time + b.stat.preempt_time + b.stat.queue_time;
+            let a_total = a.total_potential_runtime();
+            let b_total = b.total_potential_runtime();
             b_total.cmp(&a_total)
         });
         process.preempt_events.sort_by(|a, b| b.count.cmp(&a.count));
