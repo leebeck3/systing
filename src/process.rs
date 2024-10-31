@@ -1,6 +1,7 @@
 use std::ffi::CStr;
 
 use crate::systing;
+use chrono::{Local, DateTime};
 use strum_macros::EnumIter;
 
 fn pid_comm(pid: u32) -> String {
@@ -60,6 +61,11 @@ pub struct Process {
     potential_runtime: u64,
     total_time: u64,
     total_potential_runtime: u64,
+}
+
+pub struct Run {
+    pub start_time: DateTime<Local>,
+    pub processes: Vec<Process>,
 }
 
 impl Process {

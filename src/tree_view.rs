@@ -13,7 +13,7 @@ use tuirealm::{
     SubEventClause, Update,
 };
 
-use crate::process::{Process, ProcessStat};
+use crate::process::{Process, ProcessStat, Run};
 
 #[derive(Debug, PartialEq)]
 pub enum Msg {
@@ -32,6 +32,7 @@ struct Model {
     app: Application<Id, Msg, NoUserEvent>,
     redraw: bool,
     quit: bool,
+    runs: Vec<Run>,
     terminal: TerminalBridge<CrosstermTerminalAdapter>,
 }
 
@@ -42,15 +43,15 @@ fn newkey(key: &mut u64) -> String {
 }
 
 impl Model {
-    fn new(processes: &Vec<Process>) -> Self {
+    fn new(runsvec: Vec<Run>) -> Self {
         let mut app = Application::init(
             EventListenerCfg::default().crossterm_input_listener(Duration::from_millis(10), 10),
         );
         app.mount(
             Id::ProcessTree,
             Box::new(ProcessTree::new(
-                Tree::new(Self::processes_to_nodes(processes)),
-                None,
+                Tree::new(Self::processes_to_nodes(&runsvec.first().unwrap().processes)),
+                format!("Run {}", runsvec.first().unwrap().start_time.format("%Y-%m-%d %H:%M:%S")),
             )),
             vec![],
         )
@@ -73,6 +74,7 @@ impl Model {
             app,
             quit: false,
             redraw: true,
+            runs: runsvec,
             terminal: TerminalBridge::init_crossterm().expect("Failed to init terminal"),
         }
     }
@@ -208,11 +210,8 @@ pub struct ProcessTree {
 }
 
 impl ProcessTree {
-    pub fn new(tree: Tree<String>, focus: Option<String>) -> Self {
-        let focus = match focus {
-            Some(id) if tree.root().query(&id).is_some() => id,
-            _ => tree.root().id().to_string(),
-        };
+    pub fn new(tree: Tree<String>, title: String) -> Self {
+        let focus = tree.root().id().to_string();
         ProcessTree {
             component: TreeView::default()
                 .foreground(Color::Reset)
@@ -224,7 +223,7 @@ impl ProcessTree {
                 .inactive(Style::default().fg(Color::Gray))
                 .indent_size(3)
                 .scroll_step(6)
-                .title("Processes", Alignment::Left)
+                .title(title, Alignment::Left)
                 .highlighted_color(Color::LightYellow)
                 .highlight_symbol("🦄")
                 .with_tree(tree)
@@ -287,8 +286,8 @@ impl Component<Msg, NoUserEvent> for GlobalListener {
     }
 }
 
-pub fn launch_tui(processes: Vec<Process>) {
-    let mut model = Model::new(&processes);
+pub fn launch_tui(runs: Vec<Run>) {
+    let mut model = Model::new(runs);
     let _ = model.terminal.enter_alternate_screen();
     let _ = model.terminal.clear_screen();
     let _ = model.terminal.enable_raw_mode();

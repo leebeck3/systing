@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use anyhow::bail;
 use anyhow::Result;
+use chrono::Local;
 use clap::Parser;
 use ctrlc;
 use libbpf_rs::skel::OpenSkel;
@@ -27,7 +28,7 @@ mod systing {
 
 mod process;
 mod tree_view;
-use process::{Process, ProcessStat, TotalProcessStat};
+use process::{Process, ProcessStat, Run, TotalProcessStat};
 use systing::*;
 
 unsafe impl Plain for systing::types::task_stat {}
@@ -47,6 +48,8 @@ struct Command {
     tui: bool,
     #[arg(short, long, default_value = "0")]
     duration: u64,
+    #[arg(short, long, default_value = "1")]
+    loops: u64,
 }
 
 fn bump_memlock_rlimit() -> Result<()> {
@@ -62,32 +65,71 @@ fn bump_memlock_rlimit() -> Result<()> {
     Ok(())
 }
 
-fn dump_all_results(process_vec: Vec<Process>) -> Result<()> {
-    for process in process_vec.iter() {
-        print!("{} pid {} cgid {}", process.comm, process.pid, process.cgid);
-        for stat in ProcessStat::iter() {
-            print!(" {}", process.stat_str(stat));
-        }
-
-        println!("");
-
-        for pevent in process.preempt_events.iter() {
-            println!(
-                "  Preempted by {} pid {} tgid {} cgid {} times {}",
-                pevent.comm, pevent.preempt_pid, pevent.preempt_tgid, pevent.cgid, pevent.count
-            );
-        }
-        for thread in process.threads.iter() {
-            print!("\t{} pid {} cgid {}", thread.comm, thread.pid, thread.cgid);
-
+fn dump_all_results(runs: Vec<Run>) -> Result<()> {
+    for run in runs {
+        println!("Run started at {}", run.start_time.format("%Y-%m-%d %H:%M:%S"));
+        for process in run.processes.iter() {
+            print!("{} pid {} cgid {}", process.comm, process.pid, process.cgid);
             for stat in ProcessStat::iter() {
-                print!(" {}", thread.stat_str(stat));
+                print!(" {}", process.stat_str(stat));
+            }
+
+            println!("");
+
+            for pevent in process.preempt_events.iter() {
+                println!(
+                    "  Preempted by {} pid {} tgid {} cgid {} times {}",
+                    pevent.comm, pevent.preempt_pid, pevent.preempt_tgid, pevent.cgid, pevent.count
+                );
+            }
+            for thread in process.threads.iter() {
+                print!("\t{} pid {} cgid {}", thread.comm, thread.pid, thread.cgid);
+
+                for stat in ProcessStat::iter() {
+                    print!(" {}", thread.stat_str(stat));
+                }
+                println!("");
+                for pevent in thread.preempt_events.iter() {
+                    println!(
+                        "\t  Preempted by {} pid {} tgid {} cgid {} times {}",
+                        pevent.comm,
+                        pevent.preempt_pid,
+                        pevent.preempt_tgid,
+                        pevent.cgid,
+                        pevent.count
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn summarize_results(runs: Vec<Run>) -> Result<()> {
+    for run in runs {
+        println!("Run started at {}", run.start_time.format("%Y-%m-%d %H:%M:%S"));
+        for process in run.processes.iter() {
+            let total_threads = process.threads.len();
+            let mut pevents = Vec::new();
+
+            for thread in process.threads.iter() {
+                pevents.extend(&thread.preempt_events);
+            }
+            pevents.extend(&process.preempt_events);
+
+            print!(
+                "{} pid {} cgid {} threads {}",
+                process.comm, process.pid, process.cgid, total_threads
+            );
+            for stat in TotalProcessStat::iter() {
+                print!(" {}", process.total_stat_str(stat));
             }
             println!("");
-            for pevent in thread.preempt_events.iter() {
+            pevents.sort_by(|a, b| b.count.cmp(&a.count));
+            for pevent in pevents.iter() {
                 println!(
-                    "\t  Preempted by {} pid {} tgid {} cgid {} times {}",
-                    pevent.comm, pevent.preempt_pid, pevent.preempt_tgid, pevent.cgid, pevent.count
+                    "\tPreempted by {} pid {} tgid {} times {}",
+                    pevent.comm, pevent.preempt_pid, pevent.preempt_tgid, pevent.count
                 );
             }
         }
@@ -95,33 +137,106 @@ fn dump_all_results(process_vec: Vec<Process>) -> Result<()> {
     Ok(())
 }
 
-fn summarize_results(process_vec: Vec<Process>) -> Result<()> {
-    for process in process_vec.iter() {
-        let total_threads = process.threads.len();
-        let mut pevents = Vec::new();
+fn collect_results(
+    skel: &SystingSkel,
+    preempt_events: Vec<systing::types::preempt_event>,
+) -> Result<Run> {
+    let mut processes = HashMap::new();
+    let mut threads: HashMap<u32, Vec<Process>> = HashMap::new();
+    for rawkey in skel.maps.stats.keys() {
+        let mut key: u64 = 0;
+        plain::copy_from_bytes(&mut key, &rawkey).expect("Data buffer was too short");
+        let pid = key as u32;
+        let tgid: u32 = (key >> 32) as u32;
+        let rawvalue: Vec<u8> = skel
+            .maps
+            .stats
+            .lookup_and_delete(&rawkey)
+            .expect("Failed to get value")
+            .expect("No value found");
+        let mut value: systing::types::task_stat = systing::types::task_stat::default();
+        plain::copy_from_bytes(&mut value, rawvalue.as_slice()).expect("Data buffer was too short");
 
-        for thread in process.threads.iter() {
-            pevents.extend(&thread.preempt_events);
-        }
-        pevents.extend(&process.preempt_events);
+        if pid == tgid {
+            // This is the tg leader, insert it and carry on.
+            let mut process = Process::new(pid, value);
 
-        print!(
-            "{} pid {} cgid {} threads {}",
-            process.comm, process.pid, process.cgid, total_threads
-        );
-        for stat in TotalProcessStat::iter() {
-            print!(" {}", process.total_stat_str(stat));
-        }
-        println!("");
-        pevents.sort_by(|a, b| b.count.cmp(&a.count));
-        for pevent in pevents.iter() {
-            println!(
-                "\tPreempted by {} pid {} tgid {} times {}",
-                pevent.comm, pevent.preempt_pid, pevent.preempt_tgid, pevent.count
-            );
+            // If we found threads before we found the process we need to add them to our process
+            // now.
+            match threads.remove(&pid) {
+                Some(mut thread_vec) => loop {
+                    match thread_vec.pop() {
+                        Some(thread) => {
+                            process.add_thread(thread);
+                        }
+                        None => break,
+                    }
+                },
+                None => {}
+            }
+            processes.insert(pid, process);
+        } else {
+            let process = Process::new(pid, value);
+            match processes.get_mut(&tgid) {
+                Some(leader) => {
+                    leader.add_thread(process);
+                }
+                None => match threads.get_mut(&tgid) {
+                    Some(thread_vec) => {
+                        thread_vec.push(process);
+                    }
+                    None => {
+                        let mut thread_vec: Vec<Process> = Vec::new();
+                        thread_vec.push(process);
+                        threads.insert(tgid, thread_vec);
+                    }
+                },
+            }
         }
     }
-    Ok(())
+
+    // Now we need to go through the preempt events and add them to the process or thread.
+    for event in preempt_events.iter() {
+        let tgid: u32 = (event.tgidpid >> 32) as u32;
+        match processes.get_mut(&tgid) {
+            Some(process) => {
+                process.add_preempt_event(event);
+            }
+            None => {}
+        }
+    }
+
+    let mut process_vec: Vec<Process> = processes.into_iter().map(|(_, v)| v).collect();
+    process_vec.sort_by(|a, b| {
+        let mut a_total = a.stat.run_time + a.stat.preempt_time + a.stat.queue_time;
+        let mut b_total = b.stat.run_time + b.stat.preempt_time + b.stat.queue_time;
+
+        for thread in a.threads.iter() {
+            a_total += thread.stat.run_time + thread.stat.preempt_time + thread.stat.queue_time;
+        }
+
+        for thread in b.threads.iter() {
+            b_total += thread.stat.run_time + thread.stat.preempt_time + thread.stat.queue_time;
+        }
+        b_total.cmp(&a_total)
+    });
+
+    for process in process_vec.iter_mut() {
+        process.threads.sort_by(|a, b| {
+            let a_total = a.stat.run_time + a.stat.preempt_time + a.stat.queue_time;
+            let b_total = b.stat.run_time + b.stat.preempt_time + b.stat.queue_time;
+            b_total.cmp(&a_total)
+        });
+        process.preempt_events.sort_by(|a, b| b.count.cmp(&a.count));
+        for thread in process.threads.iter_mut() {
+            thread.preempt_events.sort_by(|a, b| b.count.cmp(&a.count));
+        }
+    }
+
+    Ok(Run {
+        processes: process_vec,
+        start_time: Local::now(),
+    })
 }
 
 fn main() -> Result<()> {
@@ -185,119 +300,32 @@ fn main() -> Result<()> {
         0
     });
 
-    // Wait for the duration to expire or for a Ctrl-C signal.
-    if opts.duration > 0 {
-        thread::sleep(Duration::from_secs(opts.duration));
-    } else {
-        let (tx, rx) = channel();
-        ctrlc::set_handler(move || tx.send(()).expect("Could not send signal on channel."))
-            .expect("Error setting Ctrl-C handler");
-        println!("Press Ctrl-C to stop");
-        rx.recv().expect("Could not receive signal on channel.");
+    let mut runs: Vec<Run> = Vec::new();
+    for _ in 0..opts.loops {
+        // Wait for the duration to expire or for a Ctrl-C signal.
+        if opts.duration > 0 {
+            thread::sleep(Duration::from_secs(opts.duration));
+        } else {
+            let (tx, rx) = channel();
+            ctrlc::set_handler(move || tx.send(()).expect("Could not send signal on channel."))
+                .expect("Error setting Ctrl-C handler");
+            println!("Press Ctrl-C to stop");
+            rx.recv().expect("Could not receive signal on channel.");
+        }
+        let pevents_vec = std::mem::take(&mut *preempt_events.lock().unwrap());
+        let run = collect_results(&skel, pevents_vec)?;
+        runs.push(run);
     }
 
-    println!("Stopping");
     *thread_done.lock().unwrap() = true;
     t.join().expect("Failed to join thread");
 
-    let mut processes = HashMap::new();
-    let mut threads: HashMap<u32, Vec<Process>> = HashMap::new();
-    for rawkey in skel.maps.stats.keys() {
-        let mut key: u64 = 0;
-        plain::copy_from_bytes(&mut key, &rawkey).expect("Data buffer was too short");
-        let pid = key as u32;
-        let tgid: u32 = (key >> 32) as u32;
-        let rawvalue: Vec<u8> = skel
-            .maps
-            .stats
-            .lookup(&rawkey, libbpf_rs::MapFlags::ANY)
-            .expect("Failed to get value")
-            .expect("No value found");
-        let mut value: systing::types::task_stat = systing::types::task_stat::default();
-        plain::copy_from_bytes(&mut value, rawvalue.as_slice()).expect("Data buffer was too short");
-
-        if pid == tgid {
-            // This is the tg leader, insert it and carry on.
-            let mut process = Process::new(pid, value);
-
-            // If we found threads before we found the process we need to add them to our process
-            // now.
-            match threads.remove(&pid) {
-                Some(mut thread_vec) => loop {
-                    match thread_vec.pop() {
-                        Some(thread) => {
-                            process.add_thread(thread);
-                        }
-                        None => break,
-                    }
-                },
-                None => {}
-            }
-            processes.insert(pid, process);
-        } else {
-            let process = Process::new(pid, value);
-            match processes.get_mut(&tgid) {
-                Some(leader) => {
-                    leader.add_thread(process);
-                }
-                None => match threads.get_mut(&tgid) {
-                    Some(thread_vec) => {
-                        thread_vec.push(process);
-                    }
-                    None => {
-                        let mut thread_vec: Vec<Process> = Vec::new();
-                        thread_vec.push(process);
-                        threads.insert(tgid, thread_vec);
-                    }
-                },
-            }
-        }
-    }
-
-    // Now we need to go through the preempt events and add them to the process or thread.
-    for event in preempt_events.lock().unwrap().iter() {
-        let tgid: u32 = (event.tgidpid >> 32) as u32;
-        match processes.get_mut(&tgid) {
-            Some(process) => {
-                process.add_preempt_event(event);
-            }
-            None => {}
-        }
-    }
-
-    let mut process_vec: Vec<Process> = processes.into_iter().map(|(_, v)| v).collect();
-    process_vec.sort_by(|a, b| {
-        let mut a_total = a.stat.run_time + a.stat.preempt_time + a.stat.queue_time;
-        let mut b_total = b.stat.run_time + b.stat.preempt_time + b.stat.queue_time;
-
-        for thread in a.threads.iter() {
-            a_total += thread.stat.run_time + thread.stat.preempt_time + thread.stat.queue_time;
-        }
-
-        for thread in b.threads.iter() {
-            b_total += thread.stat.run_time + thread.stat.preempt_time + thread.stat.queue_time;
-        }
-        b_total.cmp(&a_total)
-    });
-
-    for process in process_vec.iter_mut() {
-        process.threads.sort_by(|a, b| {
-            let a_total = a.stat.run_time + a.stat.preempt_time + a.stat.queue_time;
-            let b_total = b.stat.run_time + b.stat.preempt_time + b.stat.queue_time;
-            b_total.cmp(&a_total)
-        });
-        process.preempt_events.sort_by(|a, b| b.count.cmp(&a.count));
-        for thread in process.threads.iter_mut() {
-            thread.preempt_events.sort_by(|a, b| b.count.cmp(&a.count));
-        }
-    }
-
     if opts.tui {
-        tree_view::launch_tui(process_vec);
+        tree_view::launch_tui(runs);
     } else if opts.summary {
-        summarize_results(process_vec)?;
+        summarize_results(runs)?;
     } else {
-        dump_all_results(process_vec)?;
+        dump_all_results(runs)?;
     }
     Ok(())
 }
