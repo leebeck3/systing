@@ -256,7 +256,8 @@ int handle__sched_switch(u64 *ctx)
 	}
 	trace_enqueue(prev, prev_state, prev_state == TASK_RUNNING);
 
-	if (prev_state == TASK_RUNNING && next->tgid != 0) {
+	/* Don't record preempt events for idle threads. */
+	if (prev_state == TASK_RUNNING && next->tgid != 0 && prev->tgid != 0) {
 		struct preempt_event *e;
 
 		e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
