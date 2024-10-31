@@ -1,7 +1,7 @@
 use std::ffi::CStr;
 
 use crate::systing;
-use chrono::{Local, DateTime};
+use chrono::{DateTime, Local};
 use strum_macros::EnumIter;
 
 fn pid_comm(pid: u32) -> String {
@@ -92,15 +92,22 @@ impl Process {
     }
 
     pub fn with_event(pid: u32, stat: systing::types::task_stat) -> Self {
-        let mytime = stat.run_time
-            + stat.preempt_time
-            + stat.queue_time
-            + stat.irq_time
-            + stat.softirq_time
-            + stat.sleep_time
-            + stat.wait_time;
-        let mypotential_runtime =
-            stat.run_time + stat.preempt_time + stat.queue_time + stat.irq_time + stat.softirq_time;
+        // Sometimes the counters can get messed up between runs because we sync_add update in
+        // between adding and dropping the value.
+        let mytime = stat
+            .run_time
+            .wrapping_add(stat.preempt_time)
+            .wrapping_add(stat.queue_time)
+            .wrapping_add(stat.irq_time)
+            .wrapping_add(stat.softirq_time)
+            .wrapping_add(stat.sleep_time)
+            .wrapping_add(stat.wait_time);
+        let mypotential_runtime = stat
+            .run_time
+            .wrapping_add(stat.preempt_time)
+            .wrapping_add(stat.queue_time)
+            .wrapping_add(stat.irq_time)
+            .wrapping_add(stat.softirq_time);
         Process {
             pid,
             comm: Process::get_comm(pid, stat),
@@ -151,15 +158,21 @@ impl Process {
     }
 
     pub fn add_thread(&mut self, thread: Process) {
-        self.total_time += thread.time;
-        self.total_potential_runtime += thread.potential_runtime;
-        self.total_runtime += thread.stat.run_time;
-        self.total_sleep_time += thread.stat.sleep_time;
-        self.total_wait_time += thread.stat.wait_time;
-        self.total_preempt_time += thread.stat.preempt_time;
-        self.total_queue_time += thread.stat.queue_time;
-        self.total_irq_time += thread.stat.irq_time;
-        self.total_softirq_time += thread.stat.softirq_time;
+        self.total_time = self.total_time.wrapping_add(thread.time);
+        self.total_potential_runtime = self
+            .total_potential_runtime
+            .wrapping_add(thread.potential_runtime);
+        self.total_runtime = self.total_runtime.wrapping_add(thread.stat.run_time);
+        self.total_sleep_time = self.total_sleep_time.wrapping_add(thread.stat.sleep_time);
+        self.total_wait_time = self.total_wait_time.wrapping_add(thread.stat.wait_time);
+        self.total_preempt_time = self
+            .total_preempt_time
+            .wrapping_add(thread.stat.preempt_time);
+        self.total_queue_time = self.total_queue_time.wrapping_add(thread.stat.queue_time);
+        self.total_irq_time = self.total_irq_time.wrapping_add(thread.stat.irq_time);
+        self.total_softirq_time = self
+            .total_softirq_time
+            .wrapping_add(thread.stat.softirq_time);
         self.threads.push(thread);
     }
 
