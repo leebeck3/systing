@@ -11,7 +11,7 @@
 
 const volatile struct {
 	gid_t tgid;
-	u64 cgroupid;
+	u32 filter_cgroup;
 	u32 aggregate;
 } tool_config = {};
 
@@ -81,6 +81,13 @@ struct {
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
 	__type(key, u64);
+	__type(value, u8);
+	__uint(max_entries, 10240);
+} cgroups SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__type(key, u64);
 	__type(value, u64);
 	__uint(max_entries, 10240);
 } irq_events SEC(".maps");
@@ -116,8 +123,11 @@ int trace_enqueue(struct task_struct *tsk, u32 state, bool preempt)
 		return 0;
 	if (tool_config.tgid && tsk->tgid != tool_config.tgid)
 		return 0;
-	if (tool_config.cgroupid && task_cg_id(tsk) != tool_config.cgroupid)
-		return 0;
+	if (tool_config.filter_cgroup) {
+		u64 cgid = task_cg_id(tsk);
+		if (bpf_map_lookup_elem(&cgroups, &cgid) == NULL)
+			return 0;
+	}
 	value.ts = bpf_ktime_get_ns();
 	value.state = state;
 	value.preempt = preempt;
@@ -185,8 +195,11 @@ int trace_irq_enter(void)
 		return 0;
 	if (tool_config.tgid && tsk->tgid != tool_config.tgid)
 		return 0;
-	if (tool_config.cgroupid && task_cg_id(tsk) != tool_config.cgroupid)
-		return 0;
+	if (tool_config.filter_cgroup) {
+		u64 cgid = task_cg_id(tsk);
+		if (bpf_map_lookup_elem(&cgroups, &cgid) == NULL)
+			return 0;
+	}
 	start = bpf_ktime_get_ns();
 	bpf_map_update_elem(&irq_events, &key, &start, BPF_ANY);
 	return 0;

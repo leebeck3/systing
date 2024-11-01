@@ -43,8 +43,8 @@ struct Command {
     verbose: bool,
     #[arg(short, long, default_value = "0")]
     pid: u32,
-    #[arg(short, long, default_value = "")]
-    cgroup: String,
+    #[arg(short, long)]
+    cgroup: Vec<String>,
     #[arg(short, long)]
     summary: bool,
     #[arg(short, long)]
@@ -307,9 +307,8 @@ fn main() -> Result<()> {
         open_skel.maps.rodata_data.tool_config.aggregate = 1;
     }
 
-    if opts.cgroup != "" {
-        let metadata = std::fs::metadata(&opts.cgroup)?;
-        open_skel.maps.rodata_data.tool_config.cgroupid = metadata.ino();
+    if opts.cgroup.len() > 0 {
+        open_skel.maps.rodata_data.tool_config.filter_cgroup = 1;
     }
 
     let mut skel = open_skel.load()?;
@@ -320,6 +319,15 @@ fn main() -> Result<()> {
         skel.maps
             .ignore_pids
             .update(&pid, &val, libbpf_rs::MapFlags::ANY)?;
+    }
+
+    for cgroup in opts.cgroup.iter() {
+        let metadata = std::fs::metadata(cgroup)?;
+        let cgroupid = metadata.ino().to_ne_bytes();
+        let val = (1 as u8).to_ne_bytes();
+        skel.maps
+            .cgroups
+            .update(&cgroupid, &val, libbpf_rs::MapFlags::ANY)?;
     }
 
     skel.attach()?;
