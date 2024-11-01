@@ -164,6 +164,13 @@ fn sanitize_stat(stat: &mut systing::types::task_stat) -> Result<()> {
     if stat.wait_time > MAXNSECS {
         stat.wait_time = 0;
     }
+    stat.run_time = stat.run_time / 1000;
+    stat.preempt_time = stat.preempt_time / 1000;
+    stat.queue_time = stat.queue_time / 1000;
+    stat.sleep_time = stat.sleep_time / 1000;
+    stat.irq_time = stat.irq_time / 1000;
+    stat.softirq_time = stat.softirq_time / 1000;
+    stat.wait_time = stat.wait_time / 1000;
     Ok(())
 }
 
