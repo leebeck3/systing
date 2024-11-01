@@ -34,6 +34,9 @@ use systing::*;
 unsafe impl Plain for systing::types::task_stat {}
 unsafe impl Plain for systing::types::preempt_event {}
 
+// Maximum number of nanoseconds in a day.
+const MAXNSECS: u64 = 86_400_000_000_000;
+
 #[derive(Debug, Parser)]
 struct Command {
     #[arg(short, long)]
@@ -139,6 +142,31 @@ fn summarize_results(runs: Vec<Run>) -> Result<()> {
     Ok(())
 }
 
+fn sanitize_stat(stat: &mut systing::types::task_stat) -> Result<()> {
+    if stat.run_time > MAXNSECS {
+        stat.run_time = 0;
+    }
+    if stat.preempt_time > MAXNSECS {
+        stat.preempt_time = 0;
+    }
+    if stat.queue_time > MAXNSECS {
+        stat.wait_time = 0;
+    }
+    if stat.sleep_time > MAXNSECS {
+        stat.sleep_time = 0;
+    }
+    if stat.irq_time > MAXNSECS {
+        stat.irq_time = 0;
+    }
+    if stat.softirq_time > MAXNSECS {
+        stat.softirq_time = 0;
+    }
+    if stat.wait_time > MAXNSECS {
+        stat.wait_time = 0;
+    }
+    Ok(())
+}
+
 fn collect_results(
     skel: &SystingSkel,
     preempt_events: Vec<systing::types::preempt_event>,
@@ -158,6 +186,7 @@ fn collect_results(
             .expect("No value found");
         let mut value: systing::types::task_stat = systing::types::task_stat::default();
         plain::copy_from_bytes(&mut value, rawvalue.as_slice()).expect("Data buffer was too short");
+        sanitize_stat(&mut value)?;
 
         if pid == tgid {
             // This is the tg leader, insert it and carry on.
