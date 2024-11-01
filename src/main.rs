@@ -21,8 +21,8 @@ use strum::IntoEnumIterator;
 
 mod systing {
     include!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/src/bpf/systing.skel.rs"
+        env!("OUT_DIR"),
+        "/systing.skel.rs"
     ));
 }
 

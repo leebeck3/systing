@@ -1,9 +1,4 @@
-To build run
-
-```
-bpftool btf dump file /sys/kernel/btf/vmlinux format c > src/bpf/vmlinux.h
-cargo build
-```
+To build, ensure you have installed bpftool. This only builds on linux
 
 To run you can trace a cgroup, a process and it's threads, or just the whole
 system.
