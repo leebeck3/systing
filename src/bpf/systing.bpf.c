@@ -12,6 +12,7 @@
 const volatile struct {
 	gid_t tgid;
 	u64 cgroupid;
+	u32 aggregate;
 } tool_config = {};
 
 enum stat_type {
@@ -97,9 +98,17 @@ u64 task_cg_id(struct task_struct *task)
 }
 
 static __always_inline
+u64 task_key(struct task_struct *task)
+{
+	if (tool_config.aggregate)
+		return (u64)task->tgid << 32 | task->tgid;
+	return (u64)task->tgid << 32 | task->pid;
+}
+
+static __always_inline
 int trace_enqueue(struct task_struct *tsk, u32 state, bool preempt)
 {
-	u64 key = (u64)tsk->tgid << 32 | tsk->pid;
+	u64 key = task_key(tsk);
 	u32 tgid = tsk->tgid;
 	struct task_state_value value;
 
@@ -121,7 +130,7 @@ static struct task_stat zero_stat = {};
 static __always_inline
 void update_counter(struct task_struct *task, u64 delta, enum stat_type type)
 {
-	u64 key = (u64)task->tgid << 32 | task->pid;
+	u64 key = task_key(task);
 	struct task_stat *stat;
 
 	stat = bpf_map_lookup_elem(&stats, &key);
@@ -168,7 +177,7 @@ static __always_inline
 int trace_irq_enter(void)
 {
 	struct task_struct *tsk = (struct task_struct *)bpf_get_current_task_btf();
-	u64 key = (u64)tsk->tgid << 32 | tsk->pid;
+	u64 key = task_key(tsk);
 	u64 start;
 	u32 tgid = tsk->tgid;
 
@@ -189,7 +198,7 @@ int trace_irq_exit(bool softirq)
 	struct task_struct *tsk = (struct task_struct *)bpf_get_current_task_btf();
 	struct task_stat *stat;
 	u64 *start_ns;
-	u64 key = (u64)tsk->tgid << 32 | tsk->pid;
+	u64 key = task_key(tsk);
 	u64 delta;
 
 	start_ns = bpf_map_lookup_elem(&irq_events, &key);
@@ -206,7 +215,7 @@ int handle__sched_wakeup(u64 *ctx)
 {
 	/* TP_PROTO(struct task_struct *p) */
 	struct task_struct *task = (struct task_struct *)ctx[0];
-	u64 key = (u64)task->tgid << 32 | task->pid;
+	u64 key = task_key(task);
 	struct task_state_value *value;
 
 	value = bpf_map_lookup_elem(&start, &key);
@@ -245,7 +254,7 @@ int handle__sched_switch(u64 *ctx)
 	struct task_struct *next = (struct task_struct *)ctx[2];
 	int prev_state = prev->__state & TASK_STATE_MASK;
 	int next_state = next->__state & TASK_STATE_MASK;
-	u64 key = (u64)prev->tgid << 32 | prev->pid;
+	u64 key = task_key(prev);
 	u64 ts = bpf_ktime_get_ns();
 	struct task_state_value *value;
 
@@ -262,16 +271,16 @@ int handle__sched_switch(u64 *ctx)
 
 		e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
 		if (e) {
-			e->tgidpid = (u64)prev->tgid << 32 | prev->pid;
+			e->tgidpid = task_key(prev);
 			e->cgid = task_cg_id(next);
-			e->preempt_tgidpid = (u64)next->tgid << 32 | next->pid;
+			e->preempt_tgidpid = task_key(next);
 			bpf_probe_read_kernel_str(e->comm, sizeof(e->comm),
 						  next->comm);
 			bpf_ringbuf_submit(e, 0);
 		}
 	}
 
-	key = (u64)next->tgid << 32 | next->pid;
+	key = task_key(next);
 	value = bpf_map_lookup_elem(&start, &key);
 	if (value) {
 		u64 delta = ts - value->ts;

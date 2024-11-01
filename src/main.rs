@@ -50,6 +50,8 @@ struct Command {
     duration: u64,
     #[arg(short, long, default_value = "1")]
     loops: u64,
+    #[arg(short, long)]
+    aggregate: bool,
 }
 
 fn bump_memlock_rlimit() -> Result<()> {
@@ -265,6 +267,9 @@ fn main() -> Result<()> {
     let open_skel = skel_builder.open(&mut open_object)?;
 
     open_skel.maps.rodata_data.tool_config.tgid = opts.pid;
+    if opts.aggregate {
+        open_skel.maps.rodata_data.tool_config.aggregate = 1;
+    }
 
     if opts.cgroup != "" {
         let metadata = std::fs::metadata(&opts.cgroup)?;
