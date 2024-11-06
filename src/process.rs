@@ -271,7 +271,8 @@ impl Process {
 
     fn get_comm(pid: u32, stat: systing::types::task_stat) -> String {
         let comm_cstr = CStr::from_bytes_until_nul(&stat.comm).unwrap();
-        if comm_cstr.to_bytes().starts_with(&[0]) {
+        let bytes = comm_cstr.to_bytes();
+        if bytes.len() == 0 || bytes.starts_with(&[0]) {
             return pid_comm(pid);
         }
         comm_cstr.to_string_lossy().to_string()
@@ -292,8 +293,9 @@ impl Process {
 impl PreemptEvent {
     pub fn new(event: &systing::types::preempt_event) -> Self {
         let comm_cstr = CStr::from_bytes_until_nul(&event.comm).unwrap();
+        let bytes = comm_cstr.to_bytes();
         let commstr;
-        if comm_cstr.to_bytes().starts_with(&[0]) {
+        if bytes.len() == 0 || bytes.starts_with(&[0]) {
             commstr = pid_comm(event.preempt_tgidpid as u32);
         } else {
             commstr = comm_cstr.to_string_lossy().to_string();
