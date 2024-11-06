@@ -107,9 +107,15 @@ u64 task_cg_id(struct task_struct *task)
 static __always_inline
 u64 task_key(struct task_struct *task)
 {
+	return (u64)task->tgid << 32 | task->pid;
+}
+
+static __always_inline
+u64 task_stat_key(struct task_struct *task)
+{
 	if (tool_config.aggregate)
 		return (u64)task->tgid << 32 | task->tgid;
-	return (u64)task->tgid << 32 | task->pid;
+	return task_key(task);
 }
 
 static __always_inline
@@ -140,7 +146,7 @@ static struct task_stat zero_stat = {};
 static __always_inline
 void update_counter(struct task_struct *task, u64 delta, enum stat_type type)
 {
-	u64 key = task_key(task);
+	u64 key = task_stat_key(task);
 	struct task_stat *stat;
 
 	stat = bpf_map_lookup_elem(&stats, &key);
