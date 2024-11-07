@@ -9,7 +9,7 @@ use std::time::Duration;
 use anyhow::bail;
 use anyhow::Result;
 use chrono::Local;
-use clap::Parser;
+use clap::{Args, Parser, Subcommand};
 use ctrlc;
 use libbpf_rs::skel::OpenSkel;
 use libbpf_rs::skel::Skel;
@@ -39,6 +39,18 @@ const MAXNSECS: u64 = 86_400_000_000_000;
 
 #[derive(Debug, Parser)]
 struct Command {
+    #[clap(subcommand)]
+    subcmd: SubCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum SubCommand {
+    #[clap(name = "profile-sched")]
+    ProfileSched(ProfileSchedOpts),
+}
+
+#[derive(Debug, Args)]
+struct ProfileSchedOpts {
     #[arg(short, long)]
     verbose: bool,
     #[arg(short, long, default_value = "0")]
@@ -290,9 +302,7 @@ fn collect_results(
     })
 }
 
-fn main() -> Result<()> {
-    let opts = Command::parse();
-
+fn profile_sched(opts: ProfileSchedOpts) -> Result<()> {
     let mut skel_builder = SystingSkelBuilder::default();
     if opts.verbose {
         skel_builder.obj_builder.debug(true);
@@ -390,4 +400,12 @@ fn main() -> Result<()> {
         dump_all_results(runs)?;
     }
     Ok(())
+}
+
+fn main() -> Result<()> {
+    let opts = Command::parse();
+
+    match opts.subcmd {
+        SubCommand::ProfileSched(opts) => profile_sched(opts),
+    }
 }
