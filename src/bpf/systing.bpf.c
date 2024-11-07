@@ -157,8 +157,15 @@ void update_counter(struct task_struct *task, u64 delta, enum stat_type type)
 		if (!stat)
 			return;
 		stat->cgid = task_cg_id(task);
-		bpf_probe_read_kernel_str(stat->comm, sizeof(stat->comm),
-					  task->comm);
+
+		/*
+		 * If we aggregate stats just leave the comm blank so that we
+		 * pull the comm of the leader process and not whichever thread
+		 * happens to get caught first.
+		 */
+		if (!tool_config.aggregate)
+			bpf_probe_read_kernel_str(stat->comm, sizeof(stat->comm),
+						  task->comm);
 	}
 
 	switch (type) {
