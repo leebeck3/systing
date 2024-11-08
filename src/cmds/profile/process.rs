@@ -1,6 +1,6 @@
 use std::ffi::CStr;
 
-use crate::systing;
+use crate::cmds::profile::systing;
 use chrono::{DateTime, Local};
 use strum_macros::EnumIter;
 

@@ -4,12 +4,14 @@ use std::path::{Path, PathBuf};
 
 use libbpf_cargo::SkeletonBuilder;
 
-const SRC: [&'static str; 1]  = ["src/bpf/systing.bpf.c"];
+const SRC: [&'static str; 2] = [
+    "src/bpf/systing_profile.bpf.c",
+    "src/bpf/systing_describe.bpf.c",
+];
 
 fn main() {
-    let out_dir = PathBuf::from(
-        env::var_os("OUT_DIR").expect("OUT_DIR must be set in build script"),
-    );
+    let out_dir =
+        PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR must be set in build script"));
 
     let vmlinux_path = out_dir.join("vmlinux.h");
 

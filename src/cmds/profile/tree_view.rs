@@ -13,7 +13,7 @@ use tuirealm::{
     SubEventClause, Update,
 };
 
-use crate::process::{ProcessStat, Run, TotalProcessStat};
+use crate::cmds::profile::process::{ProcessStat, Run, TotalProcessStat};
 
 #[derive(Debug, PartialEq)]
 pub enum Msg {
