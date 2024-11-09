@@ -7,11 +7,14 @@ const volatile struct {
 	u32 tgid;
 } tool_config = {};
 
+#define MAX_STACK_DEPTH 24
+#define SKIP_STACK_DEPTH 3
+
 struct event_key {
 	u64 waker_tgidpid;
 	u64 wakee_tgidpid;
-	u64 kernel_stackid;
-	u64 user_stackid;
+	u64 kernel_stack[MAX_STACK_DEPTH];
+	u64 user_stack[MAX_STACK_DEPTH];
 };
 
 struct {
@@ -35,20 +38,6 @@ struct {
 	__uint(max_entries, 10240);
 } wake SEC(".maps");
 
-struct {
-	__uint(type, BPF_MAP_TYPE_STACK_TRACE);
-	__uint(key_size, sizeof(u32));
-	__uint(value_size, 4 * sizeof(u64));
-	__uint(max_entries, 10240);
-} kernel_stacks SEC(".maps");
-
-struct {
-	__uint(type, BPF_MAP_TYPE_STACK_TRACE);
-	__uint(key_size, sizeof(u32));
-	__uint(value_size, 8 * sizeof(u64));
-	__uint(max_entries, 10240);
-} user_stacks SEC(".maps");
-
 SEC("tp_btf/sched_wakeup")
 int handle__sched_wakup(u64 *ctx)
 {
@@ -62,17 +51,16 @@ int handle__sched_wakup(u64 *ctx)
 	struct event_key key = {
 		.waker_tgidpid = pid,
 		.wakee_tgidpid = (u64)task->tgid << 32 | task->pid,
-		.kernel_stackid = bpf_get_stackid(ctx, &kernel_stacks, BPF_F_REUSE_STACKID),
-		.user_stackid = bpf_get_stackid(ctx, &user_stacks, BPF_F_REUSE_STACKID|BPF_F_USER_STACK),
 	};
 	u64 *value;
 
-	value = bpf_map_lookup_elem(&wake, &key);
+	bpf_get_stack(ctx, &key.kernel_stack, sizeof(key.kernel_stack), SKIP_STACK_DEPTH);
+	value = bpf_map_lookup_elem(&waker_events, &key);
 	if (!value) {
 		u64 zero = 0;
 
-		bpf_map_update_elem(&wake, &key, &zero, BPF_ANY);
-		value = bpf_map_lookup_elem(&wake, &key);
+		bpf_map_update_elem(&waker_events, &key, &zero, BPF_ANY);
+		value = bpf_map_lookup_elem(&waker_events, &key);
 		if (!value)
 			return 0;
 	}
