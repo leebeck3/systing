@@ -10,57 +10,39 @@ const volatile struct {
 #define MAX_STACK_DEPTH 24
 #define SKIP_STACK_DEPTH 3
 
-struct event_key {
-	u64 waker_tgidpid;
-	u64 wakee_tgidpid;
+struct wakee_stack {
+	u64 start_ns;
 	u64 kernel_stack[MAX_STACK_DEPTH];
 	u64 user_stack[MAX_STACK_DEPTH];
 };
 
-struct {
-	__uint(type, BPF_MAP_TYPE_HASH);
-	__type(key, struct event_key);
-	__type(value, u64);
-	__uint(max_entries, 10240);
-} waker_events SEC(".maps");
+struct wake_event {
+	u64 waker_tgidpid;
+	u64 wakee_tgidpid;
+	u64 sleep_time_us;
+	u64 waker_kernel_stack[MAX_STACK_DEPTH];
+	u64 wakee_kernel_stack[MAX_STACK_DEPTH];
+	u64 waker_user_stack[MAX_STACK_DEPTH];
+	u64 wakee_user_stack[MAX_STACK_DEPTH];
+};
 
-struct {
-	__uint(type, BPF_MAP_TYPE_HASH);
-	__type(key, struct event_key);
-	__type(value, u64);
-	__uint(max_entries, 10240);
-} wakee_events SEC(".maps");
+/*
+ * Dummy instance to get skeleton to generate definition for
+ * `struct wake_event`
+ */
+struct wake_event _event = {0};
 
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
 	__type(key, u64);
-	__type(value, struct event_key);
+	__type(value, struct wakee_stack);
 	__uint(max_entries, 10240);
 } wakee SEC(".maps");
 
 struct {
-	__uint(type, BPF_MAP_TYPE_HASH);
-	__type(key, u64);
-	__type(value, u64);
-	__uint(max_entries, 10240);
-} wake SEC(".maps");
-
-static __always_inline
-void update_count(struct event_key *key, void *map)
-{
-	u64 *value;
-
-	value = bpf_map_lookup_elem(map, key);
-	if (!value) {
-		u64 zero = 0;
-
-		bpf_map_update_elem(map, key, &zero, BPF_ANY);
-		value = bpf_map_lookup_elem(map, key);
-		if (!value)
-			return;
-	}
-	__sync_fetch_and_add(value, 1);
-}
+	__uint(type, BPF_MAP_TYPE_RINGBUF);
+	__uint(max_entries, 10 * 1024 * 1024 /* 10Mib */);
+} events SEC(".maps");
 
 SEC("tp_btf/sched_wakeup")
 int handle__sched_wakup(u64 *ctx)
@@ -69,24 +51,29 @@ int handle__sched_wakup(u64 *ctx)
 	struct task_struct *task = (struct task_struct *)ctx[0];
 	u64 pid = bpf_get_current_pid_tgid();
 	u64 sleeper = (u64)task->tgid << 32 | task->pid;
-	struct event_key *value;
+	struct wakee_stack *value;
+	struct wake_event *event;
 
 	value = bpf_map_lookup_elem(&wakee, &sleeper);
 	if (!value)
 		return 0;
 
-	value->waker_tgidpid = pid;
-	value->wakee_tgidpid = sleeper;
-	update_count(value, &wakee_events);
-	bpf_map_delete_elem(&wakee, &sleeper);
+	event = bpf_ringbuf_reserve(&events, sizeof(*event), 0);
+	if (!event)
+		return 0;
 
-	struct event_key key = {
-		.waker_tgidpid = pid,
-		.wakee_tgidpid = sleeper,
-	};
-
-	bpf_get_stack(ctx, &key.kernel_stack, sizeof(key.kernel_stack), SKIP_STACK_DEPTH);
-	update_count(&key, &waker_events);
+	event->waker_tgidpid = pid;
+	event->wakee_tgidpid = sleeper;
+	event->sleep_time_us = (bpf_ktime_get_ns() - value->start_ns) / 1000;
+	bpf_get_stack(ctx, &event->waker_kernel_stack, sizeof(event->waker_kernel_stack),
+		      SKIP_STACK_DEPTH);
+	bpf_get_stack(ctx, &event->waker_user_stack, sizeof(event->waker_user_stack),
+		      BPF_F_USER_STACK | SKIP_STACK_DEPTH);
+	__builtin_memcpy(&event->wakee_kernel_stack, &value->kernel_stack,
+			 sizeof(event->wakee_kernel_stack));
+	__builtin_memcpy(&event->waker_user_stack, &value->user_stack,
+			 sizeof(event->waker_user_stack));
+	bpf_ringbuf_submit(event, 0);
 	return 0;
 }
 
@@ -103,9 +90,13 @@ int handle__sched_switch(u64 *ctx)
 	if (tool_config.tgid && prev->tgid != tool_config.tgid)
 		return 0;
 
-	struct event_key event = {};
-	bpf_get_stack(ctx, &event.kernel_stack, sizeof(event.kernel_stack), SKIP_STACK_DEPTH);
-	bpf_map_update_elem(&wakee, &key, &event, BPF_ANY);
+	struct wakee_stack stack = {
+		.start_ns = bpf_ktime_get_ns(),
+	};
+	bpf_get_stack(ctx, &stack.kernel_stack, sizeof(stack.kernel_stack), SKIP_STACK_DEPTH);
+	bpf_get_stack(ctx, &stack.user_stack, sizeof(stack.user_stack),
+		      SKIP_STACK_DEPTH | BPF_F_USER_STACK);
+	bpf_map_update_elem(&wakee, &key, &stack, BPF_ANY);
 	return 0;
 }
 

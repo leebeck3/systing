@@ -1,4 +1,8 @@
+use std::collections::HashMap;
+use std::hash::Hash;
 use std::mem::MaybeUninit;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -6,27 +10,14 @@ use crate::kallsyms::Kallsyms;
 use crate::DescribeOpts;
 use anyhow::Result;
 use libbpf_rs::skel::{OpenSkel, Skel, SkelBuilder};
-use libbpf_rs::MapCore;
+use libbpf_rs::RingBufferBuilder;
 use plain::Plain;
 
 mod systing {
     include!(concat!(env!("OUT_DIR"), "/systing_describe.skel.rs"));
 }
 
-unsafe impl Plain for systing::types::event_key {}
-
-enum EventTypes {
-    Waker,
-    Wakee,
-}
-
-struct StackHist {
-    waker: u64,
-    wakee: u64,
-    count: u64,
-    stack: Vec<u64>,
-    event_type: EventTypes,
-}
+unsafe impl Plain for systing::types::wake_event {}
 
 fn pid_comm(pid: u32) -> String {
     let path = format!("/proc/{}/comm", pid);
@@ -37,35 +28,70 @@ fn pid_comm(pid: u32) -> String {
     comm.unwrap().trim().to_string()
 }
 
-impl StackHist {
-    pub fn new(num: u64, stk: Vec<u64>, waker: u64, wakee: u64, t: EventTypes) -> Self {
-        StackHist {
-            waker: waker,
-            wakee: wakee,
-            count: num,
-            stack: stk,
-            event_type: t,
+#[derive(Debug, Hash, Eq, PartialEq)]
+struct WakeEventKey {
+    waker: u64,
+    wakee: u64,
+    waker_kernel_stack: Vec<u64>,
+    wakee_kernel_stack: Vec<u64>,
+    waker_user_stack: Vec<u64>,
+    wakee_user_stack: Vec<u64>,
+}
+
+struct WakeEventValue {
+    count: u64,
+    duration_us: u64,
+}
+
+struct WakeEvent {
+    key: WakeEventKey,
+    value: WakeEventValue,
+}
+
+impl WakeEventKey {
+    pub fn new(event: systing::types::wake_event) -> Self {
+        WakeEventKey {
+            waker: event.waker_tgidpid,
+            wakee: event.wakee_tgidpid,
+            waker_kernel_stack: event.waker_kernel_stack.to_vec(),
+            wakee_kernel_stack: event.wakee_kernel_stack.to_vec(),
+            waker_user_stack: event.waker_user_stack.to_vec(),
+            wakee_user_stack: event.wakee_user_stack.to_vec(),
         }
     }
+}
 
+impl WakeEvent {
     pub fn print(&self, kallsyms: &Kallsyms) {
-        match self.event_type {
-            EventTypes::Waker => println!("Waker event count: {}", self.count),
-            EventTypes::Wakee => println!("Wakee event count: {}", self.count),
-        }
         println!(
             "  Waker: tgid {} pid {} comm {}",
-            self.waker >> 32,
-            self.waker as u32,
-            pid_comm(self.waker as u32)
+            self.key.waker >> 32,
+            self.key.waker as u32,
+            pid_comm(self.key.waker as u32)
         );
         println!(
             "  Wakee: tgid {} pid {} comm {}",
-            self.wakee >> 32,
-            self.wakee as u32,
-            pid_comm(self.wakee as u32)
+            self.key.wakee >> 32,
+            self.key.wakee as u32,
+            pid_comm(self.key.wakee as u32)
         );
-        for addr in &self.stack {
+        println!(
+            "  Count: {}, Duration: {}",
+            self.value.count, self.value.duration_us
+        );
+        println!("  Waker kernel stack:");
+        for addr in &self.key.waker_kernel_stack {
+            if *addr == 0 {
+                break;
+            }
+            println!(
+                "  0x{:x} {}",
+                addr,
+                kallsyms.resolve(*addr).unwrap_or(&"unknown".to_string())
+            );
+        }
+        println!("  Wakee kernel stack:");
+        for addr in &self.key.wakee_kernel_stack {
             if *addr == 0 {
                 break;
             }
@@ -77,52 +103,6 @@ impl StackHist {
         }
         println!();
     }
-}
-
-fn consume_events(skel: &mut systing::SystingDescribeSkel) -> Vec<StackHist> {
-    let mut stack_hists = Vec::new();
-    for rawkey in skel.maps.waker_events.keys() {
-        let mut key: systing::types::event_key = systing::types::event_key::default();
-        plain::copy_from_bytes(&mut key, rawkey.as_slice()).unwrap();
-        let rawvalue = skel
-            .maps
-            .waker_events
-            .lookup(&rawkey, libbpf_rs::MapFlags::ANY)
-            .expect("Failed to lookup event")
-            .expect("Failed to get value");
-        let stack_count = u64::from_ne_bytes(rawvalue[0..8].try_into().unwrap());
-        let stack: Vec<u64> = key.kernel_stack.to_vec();
-        stack_hists.push(StackHist::new(
-            stack_count,
-            stack,
-            key.waker_tgidpid,
-            key.wakee_tgidpid,
-            EventTypes::Waker,
-        ));
-    }
-
-    for rawkey in skel.maps.wakee_events.keys() {
-        let mut key: systing::types::event_key = systing::types::event_key::default();
-        plain::copy_from_bytes(&mut key, rawkey.as_slice()).unwrap();
-        let rawvalue = skel
-            .maps
-            .wakee_events
-            .lookup(&rawkey, libbpf_rs::MapFlags::ANY)
-            .expect("Failed to lookup event")
-            .expect("Failed to get value");
-        let stack_count = u64::from_ne_bytes(rawvalue[0..8].try_into().unwrap());
-
-        let stack: Vec<u64> = key.kernel_stack.to_vec();
-        stack_hists.push(StackHist::new(
-            stack_count,
-            stack,
-            key.waker_tgidpid,
-            key.wakee_tgidpid,
-            EventTypes::Wakee,
-        ));
-    }
-
-    stack_hists
 }
 
 pub fn describe(opts: DescribeOpts) -> Result<()> {
@@ -139,13 +119,62 @@ pub fn describe(opts: DescribeOpts) -> Result<()> {
     let mut skel = open_skel.load()?;
     skel.attach()?;
 
+    let events = Arc::new(Mutex::new(HashMap::<WakeEventKey, WakeEventValue>::new()));
+    let events_clone = events.clone();
+    let thread_done = Arc::new(AtomicBool::new(false));
+    let thread_done_clone = thread_done.clone();
+    let mut builder = RingBufferBuilder::new();
+    builder
+        .add(&skel.maps.events, move |data: &[u8]| {
+            let mut event = systing::types::wake_event::default();
+            plain::copy_from_bytes(&mut event, data).expect("Data buffer was too short");
+            let key = WakeEventKey::new(event);
+            let mut myevents = events_clone.lock().unwrap();
+            match myevents.get_mut(&key) {
+                Some(ref mut value) => {
+                    value.count += 1;
+                    value.duration_us += event.sleep_time_us;
+                }
+                None => {
+                    myevents.insert(
+                        key,
+                        WakeEventValue {
+                            count: 0,
+                            duration_us: 0,
+                        },
+                    );
+                }
+            };
+            0
+        })
+        .expect("Failed to add ring buffer");
+    let ring = builder.build().expect("Failed to build ring buffer");
+
+    let t = thread::spawn(move || {
+        loop {
+            let res = ring.poll(Duration::from_millis(100));
+            if res.is_err() {
+                break;
+            }
+            if thread_done_clone.load(Ordering::Relaxed) {
+                break;
+            }
+        }
+        0
+    });
+
     thread::sleep(Duration::from_secs(10));
+    thread_done.store(true, Ordering::Relaxed);
+    t.join().expect("Failed to join thread");
 
-    let mut stack_hists = consume_events(&mut skel);
-
-    stack_hists.sort_by(|a, b| b.count.cmp(&a.count));
-    for stack_hist in stack_hists {
-        stack_hist.print(&kallsyms);
+    let events_hash = std::mem::take(&mut *events.lock().unwrap());
+    let mut events_vec: Vec<WakeEvent> = events_hash
+        .into_iter()
+        .map(|(key, value)| WakeEvent { key, value })
+        .collect();
+    events_vec.sort_by_key(|k| (k.value.duration_us, k.value.count));
+    for event in events_vec {
+        event.print(&kallsyms);
     }
     Ok(())
 }
