@@ -139,8 +139,8 @@ pub fn describe(opts: DescribeOpts) -> Result<()> {
                     myevents.insert(
                         key,
                         WakeEventValue {
-                            count: 0,
-                            duration_us: 0,
+                            count: 1,
+                            duration_us: event.sleep_time_us,
                         },
                     );
                 }
