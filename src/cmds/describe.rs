@@ -38,10 +38,10 @@ fn pid_comm(pid: u32) -> String {
 }
 
 impl StackHist {
-    pub fn new(num: u64, stk: Vec<u64>, t: EventTypes) -> Self {
+    pub fn new(num: u64, stk: Vec<u64>, waker: u64, wakee: u64, t: EventTypes) -> Self {
         StackHist {
-            waker: 0,
-            wakee: 0,
+            waker: waker,
+            wakee: wakee,
             count: num,
             stack: stk,
             event_type: t,
@@ -53,6 +53,18 @@ impl StackHist {
             EventTypes::Waker => println!("Waker event count: {}", self.count),
             EventTypes::Wakee => println!("Wakee event count: {}", self.count),
         }
+        println!(
+            "  Waker: tgid {} pid {} comm {}",
+            self.waker >> 32,
+            self.waker as u32,
+            pid_comm(self.waker as u32)
+        );
+        println!(
+            "  Wakee: tgid {} pid {} comm {}",
+            self.wakee >> 32,
+            self.wakee as u32,
+            pid_comm(self.wakee as u32)
+        );
         for addr in &self.stack {
             if *addr == 0 {
                 break;
@@ -65,6 +77,52 @@ impl StackHist {
         }
         println!();
     }
+}
+
+fn consume_events(skel: &mut systing::SystingDescribeSkel) -> Vec<StackHist> {
+    let mut stack_hists = Vec::new();
+    for rawkey in skel.maps.waker_events.keys() {
+        let mut key: systing::types::event_key = systing::types::event_key::default();
+        plain::copy_from_bytes(&mut key, rawkey.as_slice()).unwrap();
+        let rawvalue = skel
+            .maps
+            .waker_events
+            .lookup(&rawkey, libbpf_rs::MapFlags::ANY)
+            .expect("Failed to lookup event")
+            .expect("Failed to get value");
+        let stack_count = u64::from_ne_bytes(rawvalue[0..8].try_into().unwrap());
+        let stack: Vec<u64> = key.kernel_stack.to_vec();
+        stack_hists.push(StackHist::new(
+            stack_count,
+            stack,
+            key.waker_tgidpid,
+            key.wakee_tgidpid,
+            EventTypes::Waker,
+        ));
+    }
+
+    for rawkey in skel.maps.wakee_events.keys() {
+        let mut key: systing::types::event_key = systing::types::event_key::default();
+        plain::copy_from_bytes(&mut key, rawkey.as_slice()).unwrap();
+        let rawvalue = skel
+            .maps
+            .wakee_events
+            .lookup(&rawkey, libbpf_rs::MapFlags::ANY)
+            .expect("Failed to lookup event")
+            .expect("Failed to get value");
+        let stack_count = u64::from_ne_bytes(rawvalue[0..8].try_into().unwrap());
+
+        let stack: Vec<u64> = key.kernel_stack.to_vec();
+        stack_hists.push(StackHist::new(
+            stack_count,
+            stack,
+            key.waker_tgidpid,
+            key.wakee_tgidpid,
+            EventTypes::Wakee,
+        ));
+    }
+
+    stack_hists
 }
 
 pub fn describe(opts: DescribeOpts) -> Result<()> {
@@ -83,25 +141,10 @@ pub fn describe(opts: DescribeOpts) -> Result<()> {
 
     thread::sleep(Duration::from_secs(10));
 
-    let mut stack_hists = Vec::new();
-    for rawkey in skel.maps.waker_events.keys() {
-        let mut key: systing::types::event_key = systing::types::event_key::default();
-        plain::copy_from_bytes(&mut key, rawkey.as_slice()).unwrap();
-        let rawvalue = skel
-            .maps
-            .waker_events
-            .lookup(&rawkey, libbpf_rs::MapFlags::ANY)
-            .expect("Failed to lookup event")
-            .expect("Failed to get value");
-        let stack_count = u64::from_ne_bytes(rawvalue[0..8].try_into().unwrap());
-
-        let stack: Vec<u64> = key.kernel_stack.to_vec();
-        stack_hists.push(StackHist::new(stack_count, stack, EventTypes::Waker));
-    }
+    let mut stack_hists = consume_events(&mut skel);
 
     stack_hists.sort_by(|a, b| b.count.cmp(&a.count));
     for stack_hist in stack_hists {
-        println!("Event count: {}", stack_hist.count);
         stack_hist.print(&kallsyms);
     }
     Ok(())

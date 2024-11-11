@@ -42,7 +42,7 @@ fn main() {
             .source(src)
             .clang_args([OsStr::new(&include_arg)])
             .build_and_generate(&skel_path)
-            .unwrap();
+            .expect("Failed to build BPF skeleton");
         println!("cargo:rerun-if-changed={}", src);
     }
 }
