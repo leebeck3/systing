@@ -7,6 +7,7 @@ const volatile struct {
 	u32 tgid;
 } tool_config = {};
 
+#define PF_KTHREAD 0x00200000
 #define MAX_STACK_DEPTH 24
 #define SKIP_STACK_DEPTH 3
 
@@ -49,6 +50,7 @@ int handle__sched_wakup(u64 *ctx)
 {
 	/* TP_PROTO(struct task_struct *p) */
 	struct task_struct *task = (struct task_struct *)ctx[0];
+	struct task_struct *curtask = (struct task_struct *)bpf_get_current_task_btf();
 	u64 pid = bpf_get_current_pid_tgid();
 	u64 sleeper = (u64)task->tgid << 32 | task->pid;
 	struct wakee_stack *value;
@@ -67,12 +69,15 @@ int handle__sched_wakup(u64 *ctx)
 	event->sleep_time_us = (bpf_ktime_get_ns() - value->start_ns) / 1000;
 	bpf_get_stack(ctx, &event->waker_kernel_stack, sizeof(event->waker_kernel_stack),
 		      SKIP_STACK_DEPTH);
-	bpf_get_stack(ctx, &event->waker_user_stack, sizeof(event->waker_user_stack),
-		      BPF_F_USER_STACK | SKIP_STACK_DEPTH);
+	if (!(curtask->flags & PF_KTHREAD))
+		bpf_get_stack(ctx, &event->waker_user_stack,
+			      sizeof(event->waker_user_stack), BPF_F_USER_STACK);
+	else
+		event->waker_user_stack[0] = 1234;
 	__builtin_memcpy(&event->wakee_kernel_stack, &value->kernel_stack,
 			 sizeof(event->wakee_kernel_stack));
-	__builtin_memcpy(&event->waker_user_stack, &value->user_stack,
-			 sizeof(event->waker_user_stack));
+	__builtin_memcpy(&event->wakee_user_stack, &value->user_stack,
+			 sizeof(event->wakee_user_stack));
 	bpf_ringbuf_submit(event, 0);
 	return 0;
 }
@@ -93,9 +98,10 @@ int handle__sched_switch(u64 *ctx)
 	struct wakee_stack stack = {
 		.start_ns = bpf_ktime_get_ns(),
 	};
-	bpf_get_stack(ctx, &stack.kernel_stack, sizeof(stack.kernel_stack), SKIP_STACK_DEPTH);
+	bpf_get_stack(ctx, &stack.kernel_stack, sizeof(stack.kernel_stack),
+		      SKIP_STACK_DEPTH);
 	bpf_get_stack(ctx, &stack.user_stack, sizeof(stack.user_stack),
-		      SKIP_STACK_DEPTH | BPF_F_USER_STACK);
+		      BPF_F_USER_STACK);
 	bpf_map_update_elem(&wakee, &key, &stack, BPF_ANY);
 	return 0;
 }

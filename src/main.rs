@@ -3,7 +3,6 @@ use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
 
 mod cmds;
-mod kallsyms;
 
 #[derive(Debug, Parser)]
 struct Command {
