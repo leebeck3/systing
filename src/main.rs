@@ -24,6 +24,8 @@ pub struct DescribeOpts {
     verbose: bool,
     #[arg(short, long)]
     pid: u32,
+    #[arg(short, long, default_value = "0")]
+    duration: u64,
 }
 
 #[derive(Debug, Args)]

@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::hash::Hash;
 use std::mem::MaybeUninit;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::channel;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -280,7 +281,16 @@ pub fn describe(opts: DescribeOpts) -> Result<()> {
         0
     });
 
-    thread::sleep(Duration::from_secs(10));
+    if opts.duration > 0 {
+        thread::sleep(Duration::from_secs(opts.duration));
+    } else {
+        let (tx, rx) = channel();
+        ctrlc::set_handler(move || tx.send(()).expect("Could not send signal on channel."))
+            .expect("Error setting Ctrl-C handler");
+        println!("Press Ctrl-C to stop");
+        rx.recv().expect("Could not receive signal on channel.");
+    }
+
     thread_done.store(true, Ordering::Relaxed);
     t.join().expect("Failed to join thread");
 
@@ -294,7 +304,8 @@ pub fn describe(opts: DescribeOpts) -> Result<()> {
     process_events_vec.sort_by_key(|k| k.duration_us);
 
     for process_events in process_events_vec {
-        let mut events_vec: Vec<WakeEvent> = process_events.events
+        let mut events_vec: Vec<WakeEvent> = process_events
+            .events
             .into_iter()
             .map(|(key, value)| WakeEvent { key, value })
             .collect();
