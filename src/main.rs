@@ -12,7 +12,7 @@ struct Command {
 
 #[derive(Debug, Subcommand)]
 enum SubCommand {
-    #[clap(name = "profile-sched")]
+    #[clap(name = "profile")]
     ProfileSched(ProfileSchedOpts),
     #[clap(name = "describe")]
     Describe(DescribeOpts),
