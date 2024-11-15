@@ -14,6 +14,7 @@ use blazesym::{Addr, Pid};
 use libbpf_rs::skel::{OpenSkel, Skel, SkelBuilder};
 use libbpf_rs::RingBufferBuilder;
 use plain::Plain;
+use petgraph::graphmap::DiGraphMap;
 
 mod systing {
     include!(concat!(env!("OUT_DIR"), "/systing_describe.skel.rs"));
@@ -295,13 +296,38 @@ pub fn describe(opts: DescribeOpts) -> Result<()> {
     t.join().expect("Failed to join thread");
 
     let mut process_events_vec: Vec<ProcessEvents> = Vec::new();
+    let mut graph = DiGraphMap::new();
     {
         let events_hash = std::mem::take(&mut *events.lock().unwrap());
-        for (_, process_events) in events_hash {
+        for (pidtgid, process_events) in events_hash {
+            let mut edges = HashMap::<u64, u64>::new();
+            for (key, value) in process_events.events.iter() {
+                if edges.contains_key(&key.waker) {
+                    *edges.get_mut(&key.waker).unwrap() += value.duration_us;
+                } else {
+                    edges.insert(key.waker, value.duration_us);
+                }
+            }
+            for edge in edges {
+                graph.add_edge(edge.0, pidtgid, edge.1);
+            }
             process_events_vec.push(process_events);
         }
     }
     process_events_vec.sort_by_key(|k| k.duration_us);
+
+    for (waker, wakee, duration) in graph.all_edges() {
+        println!(
+            "Waker: tgid {} pid {} comm {} -> Wakee: tgid {} pid {} comm {} Duration: {}",
+            waker >> 32,
+            waker as u32,
+            pid_comm(waker as u32),
+            wakee >> 32,
+            wakee as u32,
+            pid_comm(wakee as u32),
+            duration
+        );
+    }
 
     for process_events in process_events_vec {
         let mut events_vec: Vec<WakeEvent> = process_events
