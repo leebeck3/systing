@@ -87,6 +87,40 @@ impl WakeEventKey {
     }
 }
 
+struct ProcessEvents {
+    duration_us: u64,
+    events: HashMap<WakeEventKey, WakeEventValue>,
+}
+
+impl ProcessEvents {
+    pub fn new() -> Self {
+        ProcessEvents {
+            duration_us: 0,
+            events: HashMap::new(),
+        }
+    }
+
+    pub fn add_event(&mut self, event: systing::types::wake_event) {
+        let key = WakeEventKey::new(event);
+        self.duration_us += event.sleep_time_us;
+        match self.events.get_mut(&key) {
+            Some(ref mut value) => {
+                value.count += 1;
+                value.duration_us += event.sleep_time_us;
+            }
+            None => {
+                self.events.insert(
+                    key,
+                    WakeEventValue {
+                        count: 1,
+                        duration_us: event.sleep_time_us,
+                    },
+                );
+            }
+        };
+    }
+}
+
 fn print_frame(name: &str, addr_info: Option<(Addr, Addr, usize)>, code_info: &Option<CodeInfo>) {
     let code_info = code_info.as_ref().map(|code_info| {
         let path = code_info.to_path();
@@ -161,12 +195,6 @@ impl WakeEvent {
             pid_comm(self.key.waker as u32)
         );
         println!(
-            "  Wakee: tgid {} pid {} comm {}",
-            self.key.wakee >> 32,
-            self.key.wakee as u32,
-            pid_comm(self.key.wakee as u32)
-        );
-        println!(
             "  Count: {}, Duration: {}",
             self.value.count, self.value.duration_us
         );
@@ -213,7 +241,7 @@ pub fn describe(opts: DescribeOpts) -> Result<()> {
     let mut skel = open_skel.load()?;
     skel.attach()?;
 
-    let events = Arc::new(Mutex::new(HashMap::<WakeEventKey, WakeEventValue>::new()));
+    let events = Arc::new(Mutex::new(HashMap::<u64, ProcessEvents>::new()));
     let events_clone = events.clone();
     let thread_done = Arc::new(AtomicBool::new(false));
     let thread_done_clone = thread_done.clone();
@@ -222,21 +250,16 @@ pub fn describe(opts: DescribeOpts) -> Result<()> {
         .add(&skel.maps.events, move |data: &[u8]| {
             let mut event = systing::types::wake_event::default();
             plain::copy_from_bytes(&mut event, data).expect("Data buffer was too short");
-            let key = WakeEventKey::new(event);
+            let pidtgid = event.wakee_tgidpid;
             let mut myevents = events_clone.lock().unwrap();
-            match myevents.get_mut(&key) {
-                Some(ref mut value) => {
-                    value.count += 1;
-                    value.duration_us += event.sleep_time_us;
+            match myevents.get_mut(&pidtgid) {
+                Some(ref mut process_events) => {
+                    process_events.add_event(event);
                 }
                 None => {
-                    myevents.insert(
-                        key,
-                        WakeEventValue {
-                            count: 1,
-                            duration_us: event.sleep_time_us,
-                        },
-                    );
+                    let mut process_events = ProcessEvents::new();
+                    process_events.add_event(event);
+                    myevents.insert(pidtgid, process_events);
                 }
             };
             0
@@ -261,34 +284,55 @@ pub fn describe(opts: DescribeOpts) -> Result<()> {
     thread_done.store(true, Ordering::Relaxed);
     t.join().expect("Failed to join thread");
 
-    let events_hash = std::mem::take(&mut *events.lock().unwrap());
-    let mut events_vec: Vec<WakeEvent> = events_hash
-        .into_iter()
-        .map(|(key, value)| WakeEvent { key, value })
-        .collect();
-    events_vec.sort_by_key(|k| (k.value.duration_us, k.value.count));
-    let mut src_cache = HashMap::<u32, Source>::new();
-    let symbolizer = Symbolizer::new();
-    let kernel_src = Source::Kernel(Kernel::default());
-    for event in events_vec {
-        let waker_tgid = (event.key.waker >> 32) as u32;
-        let wakee_tgid = (event.key.wakee >> 32) as u32;
+    let mut process_events_vec: Vec<ProcessEvents> = Vec::new();
+    {
+        let events_hash = std::mem::take(&mut *events.lock().unwrap());
+        for (_, process_events) in events_hash {
+            process_events_vec.push(process_events);
+        }
+    }
+    process_events_vec.sort_by_key(|k| k.duration_us);
 
-        if !src_cache.contains_key(&waker_tgid) {
-            src_cache.insert(
-                waker_tgid,
-                Source::Process(Process::new(Pid::from(waker_tgid))),
-            );
+    for process_events in process_events_vec {
+        let mut events_vec: Vec<WakeEvent> = process_events.events
+            .into_iter()
+            .map(|(key, value)| WakeEvent { key, value })
+            .collect();
+        events_vec.sort_by_key(|k| (k.value.duration_us, k.value.count));
+        let mut src_cache = HashMap::<u32, Source>::new();
+        let symbolizer = Symbolizer::new();
+        let kernel_src = Source::Kernel(Kernel::default());
+        let mut first = true;
+        for event in events_vec {
+            let waker_tgid = (event.key.waker >> 32) as u32;
+            let wakee_tgid = (event.key.wakee >> 32) as u32;
+
+            if first {
+                println!(
+                    "Process: tgid {} pid {} comm {}",
+                    wakee_tgid,
+                    event.key.wakee as u32,
+                    pid_comm(event.key.wakee as u32)
+                );
+                first = false;
+            }
+
+            if !src_cache.contains_key(&waker_tgid) {
+                src_cache.insert(
+                    waker_tgid,
+                    Source::Process(Process::new(Pid::from(waker_tgid))),
+                );
+            }
+            if !src_cache.contains_key(&wakee_tgid) {
+                src_cache.insert(
+                    wakee_tgid,
+                    Source::Process(Process::new(Pid::from(wakee_tgid))),
+                );
+            }
+            let waker_src = src_cache.get(&waker_tgid).unwrap();
+            let wakee_src = src_cache.get(&wakee_tgid).unwrap();
+            event.print(&symbolizer, waker_src, wakee_src, &kernel_src);
         }
-        if !src_cache.contains_key(&wakee_tgid) {
-            src_cache.insert(
-                wakee_tgid,
-                Source::Process(Process::new(Pid::from(wakee_tgid))),
-            );
-        }
-        let waker_src = src_cache.get(&waker_tgid).unwrap();
-        let wakee_src = src_cache.get(&wakee_tgid).unwrap();
-        event.print(&symbolizer, waker_src, wakee_src, &kernel_src);
     }
     Ok(())
 }
