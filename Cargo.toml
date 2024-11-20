@@ -15,6 +15,7 @@ blazesym = "0.2.0-rc.2"
 chrono = "0.4.38"
 clap = { version = "4.5.20", features = ["derive"] }
 ctrlc = "3.4"
+graphviz-rust = "0.9.3"
 libbpf-rs = "0.24"
 libc = "0.2"
 petgraph = "0.6.5"

@@ -28,7 +28,7 @@ fn pid_comm(pid: u32) -> String {
     let path = format!("/proc/{}/comm", pid);
     let comm = std::fs::read_to_string(path);
     if comm.is_err() {
-        return format!("Pid: {}", pid).to_string();
+        return "<unknown>".to_string();
     }
     comm.unwrap().trim().to_string()
 }
@@ -230,6 +230,40 @@ impl WakeEvent {
     }
 }
 
+fn print_graphviz(pids: Vec<u64>, graph: DiGraphMap<u64, u64>) -> Result<()> {
+    use graphviz_rust::cmd::{CommandArg, Format};
+    use graphviz_rust::dot_generator::*;
+    use graphviz_rust::dot_structures::*;
+    use graphviz_rust::exec;
+    use graphviz_rust::printer::PrinterContext;
+
+    let nodes: Vec<_> = pids
+        .iter()
+        .filter(|pid| **pid != 0)
+        .map(|pid| {
+            let label = format!("{} {}", pid_comm(*pid as u32), *pid as u32);
+            stmt!(node!(esc pid; attr!("label", esc label)))
+        })
+        .collect();
+    let edges: Vec<_> = graph
+        .all_edges()
+        .filter(|(waker, wakee, _)| *waker != 0 && *wakee != 0)
+        .map(|(waker, wakee, duration)| {
+            stmt!(edge!(node_id!(waker) => node_id!(wakee); attr!("label", duration)))
+        })
+        .collect();
+    let g = graph!(strict di id!("describe"), vec![nodes, edges].into_iter().flatten().collect());
+    exec(
+        g,
+        &mut PrinterContext::default(),
+        vec![
+            Format::Svg.into(),
+            CommandArg::Output("graph.svg".to_string()),
+        ],
+    )?;
+    Ok(())
+}
+
 pub fn describe(opts: DescribeOpts) -> Result<()> {
     let mut skel_builder = systing::SystingDescribeSkelBuilder::default();
     if opts.verbose {
@@ -323,25 +357,7 @@ pub fn describe(opts: DescribeOpts) -> Result<()> {
     }
     process_events_vec.sort_by_key(|k| k.duration_us);
 
-    println!("digraph describe {{");
-    for pid in pids {
-        if pid == 0 {
-            continue;
-        }
-        println!(
-            "\t{} [label=\"{} {}\"]",
-            pid,
-            pid_comm(pid as u32),
-            pid as u32
-        );
-    }
-    for (waker, wakee, duration) in graph.all_edges() {
-        if waker == 0 || wakee == 0 {
-            continue;
-        }
-        println!("\t{} -> {} [label=\"{}\"]", waker, wakee, duration);
-    }
-    println!("}}");
+    print_graphviz(pids, graph)?;
 
     for process_events in process_events_vec {
         let mut events_vec: Vec<WakeEvent> = process_events
