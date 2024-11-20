@@ -28,7 +28,7 @@ fn pid_comm(pid: u32) -> String {
     let path = format!("/proc/{}/comm", pid);
     let comm = std::fs::read_to_string(path);
     if comm.is_err() {
-        return "<unknown>".to_string();
+        return format!("Pid: {}", pid).to_string();
     }
     comm.unwrap().trim().to_string()
 }
