@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::hash::Hash;
+use std::io::Write;
 use std::mem::MaybeUninit;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::channel;
@@ -8,9 +9,10 @@ use std::thread;
 use std::time::Duration;
 
 use crate::DescribeOpts;
-use anyhow::Result;
+use anyhow::{Error, Result};
 use blazesym::symbolize::{CodeInfo, Input, Kernel, Process, Source, Sym, Symbolized, Symbolizer};
 use blazesym::{Addr, Pid};
+use inferno::flamegraph::Options;
 use libbpf_rs::skel::{OpenSkel, Skel, SkelBuilder};
 use libbpf_rs::RingBufferBuilder;
 use petgraph::graphmap::DiGraphMap;
@@ -31,6 +33,88 @@ fn pid_comm(pid: u32) -> String {
         return "<unknown>".to_string();
     }
     comm.unwrap().trim().to_string()
+}
+
+fn print_frame(
+    name: &str,
+    addr_info: Option<(Addr, Addr, usize)>,
+    code_info: &Option<CodeInfo>,
+) -> String {
+    let code_info = code_info.as_ref().map(|code_info| {
+        let path = code_info.to_path();
+        let path = path.display();
+
+        match (code_info.line, code_info.column) {
+            (Some(line), Some(col)) => format!(" {path}:{line}:{col}"),
+            (Some(line), None) => format!(" {path}:{line}"),
+            (None, _) => format!(" {path}"),
+        }
+    });
+
+    if let Some((input_addr, addr, offset)) = addr_info {
+        // If we have various address information bits we have a new symbol.
+        format!(
+            "  {input_addr:#0width$x}: {name} @ {addr:#x}+{offset:#x}{code_info}",
+            code_info = code_info.as_deref().unwrap_or(""),
+            width = ADDR_WIDTH
+        )
+        .to_string()
+    } else {
+        // Otherwise we are dealing with an inlined call.
+        format!(
+            "  {:width$}  {name}{code_info} [inlined]",
+            " ",
+            code_info = code_info
+                .map(|info| format!(" @{info}"))
+                .as_deref()
+                .unwrap_or(""),
+            width = ADDR_WIDTH
+        )
+        .to_string()
+    }
+}
+
+fn print_symbols<'a, I>(syms: I) -> Vec<String>
+where
+    I: IntoIterator<Item = (Addr, Symbolized<'a>)>,
+{
+    let mut ret = Vec::new();
+    for (input_addr, sym) in syms {
+        match sym {
+            Symbolized::Sym(Sym {
+                addr,
+                name,
+                offset,
+                code_info,
+                inlined,
+                ..
+            }) => {
+                ret.push(print_frame(
+                    &name,
+                    Some((input_addr, addr, offset)),
+                    &code_info,
+                ));
+                for inline in inlined {
+                    ret.push(print_frame(&inline.name, None, &inline.code_info));
+                }
+            }
+            Symbolized::Unknown(e) => {
+                ret.push(format!(
+                    "  {input_addr:#0width$x}: <unknown: {e}>",
+                    width = ADDR_WIDTH,
+                    e = e
+                ));
+            }
+        }
+    }
+    ret
+}
+
+enum StackType {
+    WakerKernel,
+    WakeeKernel,
+    WakerUser,
+    WakeeUser,
 }
 
 #[derive(Debug, Hash, Eq, PartialEq)]
@@ -87,16 +171,37 @@ impl WakeEventKey {
                 .collect(),
         }
     }
+
+    pub fn symbolize_stack(
+        &self,
+        symbolizer: &Symbolizer,
+        src: &Source,
+        stack_type: StackType,
+    ) -> Result<Vec<String>, Error> {
+        let stack = match stack_type {
+            StackType::WakerKernel => &self.waker_kernel_stack,
+            StackType::WakeeKernel => &self.wakee_kernel_stack,
+            StackType::WakerUser => &self.waker_user_stack,
+            StackType::WakeeUser => &self.wakee_user_stack,
+        };
+
+        match symbolizer.symbolize(src, Input::AbsAddr(stack)) {
+            Ok(syms) => Ok(print_symbols(stack.iter().copied().zip(syms))),
+            Err(e) => Err(e.into()),
+        }
+    }
 }
 
 struct ProcessEvents {
+    pidtgid: u64,
     duration_us: u64,
     events: HashMap<WakeEventKey, WakeEventValue>,
 }
 
 impl ProcessEvents {
-    pub fn new() -> Self {
+    pub fn new(pidtgid: u64) -> Self {
         ProcessEvents {
+            pidtgid,
             duration_us: 0,
             events: HashMap::new(),
         }
@@ -121,64 +226,65 @@ impl ProcessEvents {
             }
         };
     }
-}
 
-fn print_frame(name: &str, addr_info: Option<(Addr, Addr, usize)>, code_info: &Option<CodeInfo>) {
-    let code_info = code_info.as_ref().map(|code_info| {
-        let path = code_info.to_path();
-        let path = path.display();
+    pub fn write_flamegraph(
+        &self,
+        symbolizer: &Symbolizer,
+        src_cache: &mut HashMap<u32, Source>,
+        kernel_src: &Source,
+        w: &mut dyn Write,
+    ) {
+        let mut opts = Options::default();
+        opts.min_width = 0.1;
+        opts.title = format!(
+            "Process: tgid {} pid {} comm {}",
+            self.pidtgid >> 32,
+            self.pidtgid as u32,
+            pid_comm(self.pidtgid as u32)
+        );
 
-        match (code_info.line, code_info.column) {
-            (Some(line), Some(col)) => format!(" {path}:{line}:{col}"),
-            (Some(line), None) => format!(" {path}:{line}"),
-            (None, _) => format!(" {path}"),
-        }
-    });
+        let mut lines = Vec::new();
+        for (key, value) in self.events.iter() {
+            let mut syms = Vec::new();
+            let waker_pid = key.waker as u32;
+            let wakee_pid = key.wakee as u32;
 
-    if let Some((input_addr, addr, offset)) = addr_info {
-        // If we have various address information bits we have a new symbol.
-        println!(
-            "  {input_addr:#0width$x}: {name} @ {addr:#x}+{offset:#x}{code_info}",
-            code_info = code_info.as_deref().unwrap_or(""),
-            width = ADDR_WIDTH
-        )
-    } else {
-        // Otherwise we are dealing with an inlined call.
-        println!(
-            "  {:width$}  {name}{code_info} [inlined]",
-            " ",
-            code_info = code_info
-                .map(|info| format!(" @{info}"))
-                .as_deref()
-                .unwrap_or(""),
-            width = ADDR_WIDTH
-        )
-    }
-}
-
-fn print_symbols<'a, I>(syms: I)
-where
-    I: IntoIterator<Item = (Addr, Symbolized<'a>)>,
-{
-    for (input_addr, sym) in syms {
-        match sym {
-            Symbolized::Sym(Sym {
-                addr,
-                name,
-                offset,
-                code_info,
-                inlined,
-                ..
-            }) => {
-                print_frame(&name, Some((input_addr, addr, offset)), &code_info);
-                for inline in inlined {
-                    print_frame(&inline.name, None, &inline.code_info);
-                }
+            if !src_cache.contains_key(&waker_pid) {
+                src_cache.insert(
+                    waker_pid,
+                    Source::Process(Process::new(Pid::from(waker_pid))),
+                );
             }
-            Symbolized::Unknown(e) => {
-                println!("  {input_addr:#0width$x}: <{e}>", width = ADDR_WIDTH)
+            if !src_cache.contains_key(&wakee_pid) {
+                src_cache.insert(
+                    wakee_pid,
+                    Source::Process(Process::new(Pid::from(wakee_pid))),
+                );
             }
+
+            let waker_src = src_cache.get(&(key.waker as u32)).unwrap();
+            let wakee_src = src_cache.get(&(key.wakee as u32)).unwrap();
+
+            syms.extend(
+                key.symbolize_stack(symbolizer, wakee_src, StackType::WakeeUser)
+                    .unwrap(),
+            );
+            syms.extend(
+                key.symbolize_stack(symbolizer, kernel_src, StackType::WakeeKernel)
+                    .unwrap(),
+            );
+            syms.push(format!("{}_{}", pid_comm(waker_pid), waker_pid).to_string());
+            syms.extend(
+                key.symbolize_stack(symbolizer, kernel_src, StackType::WakerKernel)
+                    .unwrap(),
+            );
+            syms.extend(
+                key.symbolize_stack(symbolizer, waker_src, StackType::WakerUser)
+                    .unwrap(),
+            );
+            lines.push(format!("{} {}", syms.join(";"), value.duration_us));
         }
+        inferno::flamegraph::from_lines(&mut opts, lines.iter().map(|x| x.as_str()), w).unwrap();
     }
 }
 
@@ -201,31 +307,47 @@ impl WakeEvent {
             self.value.count, self.value.duration_us
         );
         println!("  Waker kernel stack:");
-        match symbolizer.symbolize(kernel_src, Input::AbsAddr(&self.key.waker_kernel_stack)) {
-            Ok(syms) => print_symbols(self.key.waker_kernel_stack.iter().copied().zip(syms)),
+        match self
+            .key
+            .symbolize_stack(symbolizer, kernel_src, StackType::WakerKernel)
+        {
+            Ok(syms) => println!("{}", syms.join("\n")),
             Err(e) => eprintln!("Failed to symbolize waker kernel stack: {}", e),
         };
 
-        if !self.key.waker_user_stack.is_empty() {
-            println!("  Waker user stack:");
-            match symbolizer.symbolize(waker_src, Input::AbsAddr(&self.key.waker_user_stack)) {
-                Ok(syms) => print_symbols(self.key.waker_user_stack.iter().copied().zip(syms)),
-                Err(e) => eprintln!("Failed to symbolize waker user stack: {}", e),
-            };
-        }
+        match self
+            .key
+            .symbolize_stack(symbolizer, waker_src, StackType::WakerUser)
+        {
+            Ok(syms) => {
+                if !syms.is_empty() {
+                    println!("  Waker user stack:");
+                    println!("{}", syms.join("\n"));
+                }
+            }
+            Err(e) => eprintln!("Failed to symbolize waker user stack: {}", e),
+        };
 
         println!("  Wakee kernel stack:");
-        match symbolizer.symbolize(kernel_src, Input::AbsAddr(&self.key.wakee_kernel_stack)) {
-            Ok(syms) => print_symbols(self.key.wakee_kernel_stack.iter().copied().zip(syms)),
+        match self
+            .key
+            .symbolize_stack(symbolizer, kernel_src, StackType::WakeeKernel)
+        {
+            Ok(syms) => println!("{}", syms.join("\n")),
             Err(e) => eprintln!("Failed to symbolize wakee kernel stack: {}", e),
         };
-        if !self.key.wakee_user_stack.is_empty() {
-            println!("  Wakee user stack:");
-            match symbolizer.symbolize(wakee_src, Input::AbsAddr(&self.key.wakee_user_stack)) {
-                Ok(syms) => print_symbols(self.key.wakee_user_stack.iter().copied().zip(syms)),
-                Err(e) => eprintln!("Failed to symbolize wakee user stack: {}", e),
-            };
-        }
+        match self
+            .key
+            .symbolize_stack(symbolizer, wakee_src, StackType::WakeeUser)
+        {
+            Ok(syms) => {
+                if !syms.is_empty() {
+                    println!("  Wakee user stack:");
+                    println!("{}", syms.join("\n"));
+                }
+            }
+            Err(e) => eprintln!("Failed to symbolize wakee user stack: {}", e),
+        };
         println!();
     }
 }
@@ -258,9 +380,70 @@ fn print_graphviz(pids: Vec<u64>, graph: DiGraphMap<u64, u64>) -> Result<()> {
         &mut PrinterContext::default(),
         vec![
             Format::Svg.into(),
-            CommandArg::Output("graph.svg".to_string()),
+            CommandArg::Output("systing-describe/graph.svg".to_string()),
         ],
     )?;
+    Ok(())
+}
+
+fn print_stdout(process_events_vec: Vec<ProcessEvents>) -> Result<()> {
+    let mut src_cache = HashMap::<u32, Source>::new();
+    let symbolizer = Symbolizer::new();
+    let kernel_src = Source::Kernel(Kernel::default());
+
+    for process_events in process_events_vec {
+        let mut events_vec: Vec<WakeEvent> = process_events
+            .events
+            .into_iter()
+            .map(|(key, value)| WakeEvent { key, value })
+            .collect();
+        events_vec.sort_by_key(|k| (k.value.duration_us, k.value.count));
+        let mut first = true;
+        for event in events_vec {
+            let wakee_pid = event.key.wakee as u32;
+            let waker_pid = event.key.waker as u32;
+
+            if first {
+                println!(
+                    "Process: tgid {} pid {} comm {}",
+                    (event.key.wakee >> 32) as u32,
+                    wakee_pid,
+                    pid_comm(wakee_pid)
+                );
+                first = false;
+            }
+
+            if !src_cache.contains_key(&waker_pid) {
+                src_cache.insert(
+                    waker_pid,
+                    Source::Process(Process::new(Pid::from(waker_pid))),
+                );
+            }
+            if !src_cache.contains_key(&wakee_pid) {
+                src_cache.insert(
+                    wakee_pid,
+                    Source::Process(Process::new(Pid::from(wakee_pid))),
+                );
+            }
+            let waker_src = src_cache.get(&waker_pid).unwrap();
+            let wakee_src = src_cache.get(&wakee_pid).unwrap();
+            event.print(&symbolizer, waker_src, wakee_src, &kernel_src);
+        }
+    }
+    Ok(())
+}
+
+fn generate_flamegraphs(process_events_vec: Vec<ProcessEvents>) -> Result<()> {
+    let mut src_cache = HashMap::<u32, Source>::new();
+    let symbolizer = Symbolizer::new();
+    let kernel_src = Source::Kernel(Kernel::default());
+    for process_events in process_events_vec {
+        let mut file = std::fs::File::create(format!(
+            "systing-describe/flamegraph-{}.svg",
+            process_events.pidtgid as u32
+        ))?;
+        process_events.write_flamegraph(&symbolizer, &mut src_cache, &kernel_src, &mut file);
+    }
     Ok(())
 }
 
@@ -293,7 +476,7 @@ pub fn describe(opts: DescribeOpts) -> Result<()> {
                     process_events.add_event(event);
                 }
                 None => {
-                    let mut process_events = ProcessEvents::new();
+                    let mut process_events = ProcessEvents::new(pidtgid);
                     process_events.add_event(event);
                     myevents.insert(pidtgid, process_events);
                 }
@@ -357,49 +540,13 @@ pub fn describe(opts: DescribeOpts) -> Result<()> {
     }
     process_events_vec.sort_by_key(|k| k.duration_us);
 
+    std::fs::create_dir_all("systing-describe")?;
     print_graphviz(pids, graph)?;
-
-    for process_events in process_events_vec {
-        let mut events_vec: Vec<WakeEvent> = process_events
-            .events
-            .into_iter()
-            .map(|(key, value)| WakeEvent { key, value })
-            .collect();
-        events_vec.sort_by_key(|k| (k.value.duration_us, k.value.count));
-        let mut src_cache = HashMap::<u32, Source>::new();
-        let symbolizer = Symbolizer::new();
-        let kernel_src = Source::Kernel(Kernel::default());
-        let mut first = true;
-        for event in events_vec {
-            let waker_tgid = (event.key.waker >> 32) as u32;
-            let wakee_tgid = (event.key.wakee >> 32) as u32;
-
-            if first {
-                println!(
-                    "Process: tgid {} pid {} comm {}",
-                    wakee_tgid,
-                    event.key.wakee as u32,
-                    pid_comm(event.key.wakee as u32)
-                );
-                first = false;
-            }
-
-            if !src_cache.contains_key(&waker_tgid) {
-                src_cache.insert(
-                    waker_tgid,
-                    Source::Process(Process::new(Pid::from(waker_tgid))),
-                );
-            }
-            if !src_cache.contains_key(&wakee_tgid) {
-                src_cache.insert(
-                    wakee_tgid,
-                    Source::Process(Process::new(Pid::from(wakee_tgid))),
-                );
-            }
-            let waker_src = src_cache.get(&waker_tgid).unwrap();
-            let wakee_src = src_cache.get(&wakee_tgid).unwrap();
-            event.print(&symbolizer, waker_src, wakee_src, &kernel_src);
-        }
+    if opts.raw_output {
+        print_stdout(process_events_vec)?;
+    } else {
+        generate_flamegraphs(process_events_vec)?;
     }
+
     Ok(())
 }
