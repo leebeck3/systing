@@ -267,20 +267,20 @@ impl ProcessEvents {
 
             syms.extend(
                 key.symbolize_stack(symbolizer, wakee_src, StackType::WakeeUser)
-                    .unwrap(),
+                    .unwrap_or(Vec::new()),
             );
             syms.extend(
                 key.symbolize_stack(symbolizer, kernel_src, StackType::WakeeKernel)
-                    .unwrap(),
+                    .unwrap_or(Vec::new()),
             );
             syms.push(format!("{}_{}", pid_comm(waker_pid), waker_pid).to_string());
             syms.extend(
                 key.symbolize_stack(symbolizer, kernel_src, StackType::WakerKernel)
-                    .unwrap(),
+                    .unwrap_or(Vec::new()),
             );
             syms.extend(
                 key.symbolize_stack(symbolizer, waker_src, StackType::WakerUser)
-                    .unwrap(),
+                    .unwrap_or(Vec::new()),
             );
             lines.push(format!("{} {}", syms.join(";"), value.duration_us));
         }
