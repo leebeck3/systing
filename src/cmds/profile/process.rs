@@ -22,6 +22,7 @@ pub enum ProcessStat {
     QueueTime,
     IrqTime,
     SoftirqTime,
+    WakingTime,
 }
 
 #[derive(EnumIter, Debug)]
@@ -33,6 +34,7 @@ pub enum TotalProcessStat {
     TotalQueueTime,
     TotalIrqTime,
     TotalSoftirqTime,
+    TotalWakingTime,
 }
 
 pub struct PreemptEvent {
@@ -57,6 +59,7 @@ pub struct Process {
     total_queue_time: u64,
     total_irq_time: u64,
     total_softirq_time: u64,
+    total_waking_time: u64,
     time: u64,
     potential_runtime: u64,
     total_time: u64,
@@ -84,6 +87,7 @@ impl Process {
             total_queue_time: 0,
             total_irq_time: 0,
             total_softirq_time: 0,
+            total_waking_time: 0,
             time: 0,
             potential_runtime: 0,
             total_time: 0,
@@ -100,9 +104,14 @@ impl Process {
             + stat.irq_time
             + stat.softirq_time
             + stat.sleep_time
-            + stat.wait_time;
-        let mypotential_runtime =
-            stat.run_time + stat.preempt_time + stat.queue_time + stat.irq_time + stat.softirq_time;
+            + stat.wait_time
+            + stat.waking_time;
+        let mypotential_runtime = stat.run_time
+            + stat.preempt_time
+            + stat.queue_time
+            + stat.irq_time
+            + stat.softirq_time
+            + stat.waking_time;
         Process {
             pid,
             comm: Process::get_comm(pid, stat),
@@ -121,6 +130,7 @@ impl Process {
             total_queue_time: stat.queue_time,
             total_irq_time: stat.irq_time,
             total_softirq_time: stat.softirq_time,
+            total_waking_time: stat.waking_time,
         }
     }
 
@@ -162,6 +172,7 @@ impl Process {
         self.total_queue_time += thread.stat.queue_time;
         self.total_irq_time += thread.stat.irq_time;
         self.total_softirq_time += thread.stat.softirq_time;
+        self.total_waking_time += thread.stat.waking_time;
         self.threads.push(thread);
     }
 
@@ -221,6 +232,12 @@ impl Process {
                 self.stat.softirq_time * 100 / self.process_time(),
                 self.stat.softirq_time * 100 / self.potential_runtime()
             ),
+            ProcessStat::WakingTime => format!(
+                "Waking Time: {}({}% total time, {}% runtime)",
+                self.stat.waking_time,
+                self.stat.waking_time * 100 / self.process_time(),
+                self.stat.waking_time * 100 / self.potential_runtime()
+            ),
         }
     }
 
@@ -265,6 +282,12 @@ impl Process {
                 self.total_softirq_time,
                 self.total_softirq_time * 100 / self.total_time(),
                 self.total_softirq_time * 100 / self.total_potential_runtime()
+            ),
+            TotalProcessStat::TotalWakingTime => format!(
+                "Total Waking Time: {}({}% total time, {}% runtime)",
+                self.total_waking_time,
+                self.total_waking_time * 100 / self.total_time(),
+                self.total_waking_time * 100 / self.total_potential_runtime()
             ),
         }
     }

@@ -5,6 +5,13 @@
 #define TASK_RUNNING 0
 #define TASK_INTERRUPTIBLE 1
 #define TASK_UNINTERRUPTIBLE 2
+
+/*
+ * Used specifically to make sure we don't accidentally record stats for a value
+ * we didn't catch at sched_waking time.
+ */
+#define TASK_WAKING 4567
+
 #define TASK_STATE_MASK 3
 
 #define TASK_COMM_LEN 16
@@ -23,6 +30,7 @@ enum stat_type {
 	STAT_QUEUE_TIME,
 	STAT_IRQ_TIME,
 	STAT_SOFTIRQ_TIME,
+	STAT_WAKING_TIME,
 	STAT_MAX,
 };
 
@@ -42,6 +50,7 @@ struct task_stat {
 	u64 queue_time;
 	u64 irq_time;
 	u64 softirq_time;
+	u64 waking_time;
 };
 
 struct preempt_event {
@@ -190,6 +199,9 @@ void update_counter(struct task_struct *task, u64 delta, enum stat_type type)
 	case STAT_SOFTIRQ_TIME:
 		__sync_fetch_and_add(&stat->softirq_time, delta);
 		break;
+	case STAT_WAKING_TIME:
+		__sync_fetch_and_add(&stat->waking_time, delta);
+		break;
 	default:
 		break;
 	}
@@ -248,11 +260,8 @@ int handle__sched_wakeup(u64 *ctx)
 	if (value) {
 		u64 delta = bpf_ktime_get_ns() - value->ts;
 		switch (value->state) {
-		case TASK_INTERRUPTIBLE:
-			update_counter(task, delta, STAT_SLEEP_TIME);
-			break;
-		case TASK_UNINTERRUPTIBLE:
-			update_counter(task, delta, STAT_WAIT_TIME);
+		case TASK_WAKING:
+			update_counter(task, delta, STAT_WAKING_TIME);
 			break;
 		default:
 			break;
@@ -308,7 +317,7 @@ int handle__sched_switch(u64 *ctx)
 
 	key = task_key(next);
 	value = bpf_map_lookup_elem(&start, &key);
-	if (value) {
+	if (value && value->state == TASK_RUNNING) {
 		u64 delta = ts - value->ts;
 		if (value->preempt)
 			update_counter(next, delta, STAT_PREEMPT_TIME);
@@ -317,6 +326,31 @@ int handle__sched_switch(u64 *ctx)
 	}
 	trace_enqueue(next, next_state, false);
 	return 0;
+}
+
+SEC("tp_btf/sched_waking")
+int handle__sched_waking(u64 *ctx)
+{
+	/* TP_PROTO(struct task_struct *p) */
+	struct task_struct *task = (struct task_struct *)ctx[0];
+	u64 key = task_key(task);
+	struct task_state_value *value;
+
+	value = bpf_map_lookup_elem(&start, &key);
+	if (value) {
+		u64 delta = bpf_ktime_get_ns() - value->ts;
+		switch (value->state) {
+		case TASK_INTERRUPTIBLE:
+			update_counter(task, delta, STAT_SLEEP_TIME);
+			break;
+		case TASK_UNINTERRUPTIBLE:
+			update_counter(task, delta, STAT_WAIT_TIME);
+			break;
+		default:
+			break;
+		}
+	}
+	return trace_enqueue(task, TASK_WAKING, false);
 }
 
 SEC("tp_btf/irq_handler_entry")
