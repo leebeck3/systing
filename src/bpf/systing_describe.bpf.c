@@ -45,7 +45,7 @@ struct {
 	__uint(max_entries, 10 * 1024 * 1024 /* 10Mib */);
 } events SEC(".maps");
 
-SEC("tp_btf/sched_wakeup")
+SEC("tp_btf/sched_waking")
 int handle__sched_wakup(u64 *ctx)
 {
 	/* TP_PROTO(struct task_struct *p) */
