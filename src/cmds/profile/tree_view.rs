@@ -311,6 +311,7 @@ pub fn launch_tui(runs: Vec<Run>) {
     let _ = model.terminal.enter_alternate_screen();
     let _ = model.terminal.clear_screen();
     let _ = model.terminal.enable_raw_mode();
+    let _ = model.terminal.disable_mouse_capture();
 
     while !model.quit {
         if let Ok(messages) = model.app.tick(PollStrategy::Once) {
