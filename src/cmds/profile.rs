@@ -14,6 +14,7 @@ use libbpf_rs::skel::Skel;
 use libbpf_rs::skel::SkelBuilder;
 use libbpf_rs::MapCore;
 use libbpf_rs::RingBufferBuilder;
+use libbpf_rs::MapFlags;
 use plain::Plain;
 use strum::IntoEnumIterator;
 
@@ -151,17 +152,12 @@ fn collect_results(
 ) -> Result<Run> {
     let mut processes = HashMap::new();
     let mut threads: HashMap<u32, Vec<Process>> = HashMap::new();
-    for rawkey in skel.maps.stats.keys() {
+    let results = skel.maps.stats.lookup_and_delete_batch(1024, MapFlags::ANY, MapFlags::ANY)?;
+    for (rawkey, rawvalue) in results {
         let mut key: u64 = 0;
         plain::copy_from_bytes(&mut key, &rawkey).expect("Data buffer was too short");
         let pid = key as u32;
         let tgid: u32 = (key >> 32) as u32;
-        let rawvalue: Vec<u8> = skel
-            .maps
-            .stats
-            .lookup_and_delete(&rawkey)
-            .expect("Failed to get value")
-            .expect("No value found");
         let mut value: systing::types::task_stat = systing::types::task_stat::default();
         plain::copy_from_bytes(&mut value, rawvalue.as_slice()).expect("Data buffer was too short");
         sanitize_stat(&mut value)?;
