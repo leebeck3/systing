@@ -13,7 +13,7 @@ use tuirealm::{
     SubEventClause, Update,
 };
 
-use crate::cmds::profile::process::{ProcessStat, Run, TotalProcessStat};
+use crate::cmds::profile::process::{Process, ProcessStat, TotalProcessStat};
 
 #[derive(Debug, PartialEq)]
 pub enum Msg {
@@ -42,20 +42,17 @@ fn newkey(key: &mut u64) -> String {
 }
 
 impl Model {
-    fn new(runs: Vec<Run>) -> Self {
+    fn new(processes: Vec<Process>) -> Self {
         let mut app = Application::init(
             EventListenerCfg::default().crossterm_input_listener(Duration::from_millis(10), 10),
         );
-        let title = format!("Runs: {}", runs.len()).to_string();
-        let mut scroll = 0;
-        for run in runs.iter() {
-            scroll += run.processes.len();
-        }
+        let title = format!("Processes: {}", processes.len()).to_string();
+        let mut scroll = processes.len();
         scroll /= 4;
         app.mount(
             Id::ProcessTree,
             Box::new(ProcessTree::new(
-                Tree::new(Self::runs_to_nodes(runs)),
+                Tree::new(Self::processes_to_nodes(processes)),
                 title,
                 scroll,
             )),
@@ -90,122 +87,106 @@ impl Model {
         });
     }
 
-    fn runs_to_nodes(runs: Vec<Run>) -> Node<String> {
-        let mut key: u64 = 0;
-        let mut node = Node::new(newkey(&mut key), "Runs".to_string());
-        for run in runs {
-            let mut rnode = Node::new(
-                newkey(&mut key),
-                format!("Run: {}", run.start_time.format("%Y-%m-%d %H:%M:%S")).to_string(),
-            );
-            for p in run.processes.iter() {
-                let mut pnode = Node::new(
-                    newkey(&mut key),
-                    format!("{} ({})", p.comm, p.pid).to_string(),
-                );
-                pnode.add_child(Node::new(
-                    newkey(&mut key),
-                    format!("Cgroup ID: {}", p.stat.cgid).to_string(),
+    fn proccess_to_nodes(process: &Process, key: &mut u64) -> Node<String> {
+        let mut pnode = Node::new(
+            newkey(key),
+            format!("{} ({})", process.comm, process.pid).to_string(),
+        );
+        pnode.add_child(Node::new(
+            newkey(key),
+            format!("Cgroup ID: {}", process.cgid).to_string(),
+        ));
+
+        let mut pstat = Node::new(newkey(key), "Process Stats".to_string());
+        for stat in ProcessStat::iter() {
+            let mut snode = Node::new(newkey(key), stat.to_string());
+            for r in process.runs.iter() {
+                snode.add_child(Node::new(
+                    newkey(key),
+                    format!("{}: {}", r.start_time.format("%H:%M:%S"), r.stat_str(&stat)),
                 ));
-
-                let mut pstat = Node::new(newkey(&mut key), "Process Stats".to_string());
-                for stat in ProcessStat::iter() {
-                    pstat.add_child(Node::new(newkey(&mut key), p.stat_str(stat)));
-                }
-                pnode.add_child(pstat);
-
-                let mut pstat = Node::new(newkey(&mut key), "Total Stats".to_string());
-                for stat in TotalProcessStat::iter() {
-                    pstat.add_child(Node::new(newkey(&mut key), p.total_stat_str(stat)));
-                }
-                pnode.add_child(pstat);
-
-                let mut threads_node = Node::new(
-                    newkey(&mut key),
-                    format!("Threads: {}", p.threads.len()).to_string(),
-                );
-                for thread in p.threads.iter() {
-                    let mut tnode = Node::new(
-                        newkey(&mut key),
-                        format!("{} ({})", thread.comm, thread.pid).to_string(),
-                    );
-                    tnode.add_child(Node::new(
-                        newkey(&mut key),
-                        format!("Cgroup ID: {}", thread.stat.cgid).to_string(),
-                    ));
-                    for stat in ProcessStat::iter() {
-                        tnode.add_child(Node::new(newkey(&mut key), thread.stat_str(stat)));
-                    }
-                    if thread.preempt_events.len() > 0 {
-                        let mut pevents = Node::new(
-                            newkey(&mut key),
-                            format!("Preempt Events: {}", thread.preempt_events.len()).to_string(),
-                        );
-                        for pevent in thread.preempt_events.iter() {
-                            let mut pevent_node = Node::new(
-                                newkey(&mut key),
-                                format!("{}: {}", pevent.comm, pevent.count).to_string(),
-                            );
-                            pevent_node.add_child(Node::new(
-                                newkey(&mut key),
-                                format!("Pid: {}", pevent.preempt_pid).to_string(),
-                            ));
-                            pevent_node.add_child(Node::new(
-                                newkey(&mut key),
-                                format!("Tgid: {}", pevent.preempt_tgid).to_string(),
-                            ));
-                            pevent_node.add_child(Node::new(
-                                newkey(&mut key),
-                                format!("Cgroup ID: {}", pevent.cgid).to_string(),
-                            ));
-                            pevent_node.add_child(Node::new(
-                                newkey(&mut key),
-                                format!("Count: {}", pevent.count).to_string(),
-                            ));
-                            pevents.add_child(pevent_node);
-                        }
-                        tnode.add_child(pevents);
-                    }
-                    threads_node.add_child(tnode);
-                }
-                if threads_node.count() > 1 {
-                    pnode.add_child(threads_node);
-                }
-
-                let mut pevents = Node::new(
-                    newkey(&mut key),
-                    format!("Preempt Events: {}", p.preempt_events.len()).to_string(),
-                );
-                for pevent in p.preempt_events.iter() {
-                    let mut pevent_node = Node::new(
-                        newkey(&mut key),
-                        format!("{}: {}", pevent.comm, pevent.count).to_string(),
-                    );
-                    pevent_node.add_child(Node::new(
-                        newkey(&mut key),
-                        format!("Pid: {}", pevent.preempt_pid).to_string(),
-                    ));
-                    pevent_node.add_child(Node::new(
-                        newkey(&mut key),
-                        format!("Tgid: {}", pevent.preempt_tgid).to_string(),
-                    ));
-                    pevent_node.add_child(Node::new(
-                        newkey(&mut key),
-                        format!("Cgid: {}", pevent.cgid).to_string(),
-                    ));
-                    pevent_node.add_child(Node::new(
-                        newkey(&mut key),
-                        format!("Count: {}", pevent.count).to_string(),
-                    ));
-                    pevents.add_child(pevent_node);
-                }
-                if pevents.count() > 1 {
-                    pnode.add_child(pevents);
-                }
-
-                rnode.add_child(pnode);
             }
-            node.add_child(rnode);
+            pstat.add_child(snode);
+        }
+        pnode.add_child(pstat);
+
+        let mut pstat = Node::new(newkey(key), "Total Stats".to_string());
+        for stat in TotalProcessStat::iter() {
+            let mut snode = Node::new(newkey(key), stat.to_string());
+            for r in process.runs.iter() {
+                snode.add_child(Node::new(
+                    newkey(key),
+                    format!(
+                        "{}: {}",
+                        r.start_time.format("%H:%M:%S"),
+                        r.total_stat_str(&stat)
+                    ),
+                ));
+            }
+            pstat.add_child(snode);
+        }
+        pnode.add_child(pstat);
+
+        let mut pevents = Node::new(newkey(key), "Preempt Events".to_string());
+        for r in process.runs.iter() {
+            let mut run_pevents = Node::new(
+                newkey(key),
+                format!(
+                    "Run: {}, events {}",
+                    r.start_time.format("%H:%M:%S"),
+                    r.preempt_events.len()
+                )
+                .to_string(),
+            );
+            for pevent in r.preempt_events.iter() {
+                let mut pevent_node = Node::new(
+                    newkey(key),
+                    format!("{}: {}", pevent.comm, pevent.count).to_string(),
+                );
+                pevent_node.add_child(Node::new(
+                    newkey(key),
+                    format!("Pid: {}", pevent.preempt_pid).to_string(),
+                ));
+                pevent_node.add_child(Node::new(
+                    newkey(key),
+                    format!("Tgid: {}", pevent.preempt_tgid).to_string(),
+                ));
+                pevent_node.add_child(Node::new(
+                    newkey(key),
+                    format!("Cgid: {}", pevent.cgid).to_string(),
+                ));
+                pevent_node.add_child(Node::new(
+                    newkey(key),
+                    format!("Count: {}", pevent.count).to_string(),
+                ));
+                run_pevents.add_child(pevent_node);
+            }
+            if run_pevents.count() > 1 {
+                pevents.add_child(run_pevents);
+            }
+        }
+        if pevents.count() > 1 {
+            pnode.add_child(pevents);
+        }
+        pnode
+    }
+
+    fn processes_to_nodes(processes: Vec<Process>) -> Node<String> {
+        let mut key: u64 = 0;
+        let mut node = Node::new(newkey(&mut key), "Processes".to_string());
+        for process in processes.iter() {
+            let mut pnode = Self::proccess_to_nodes(process, &mut key);
+            let mut threads_node = Node::new(
+                newkey(&mut key),
+                format!("Threads: {}", process.threads.len()).to_string(),
+            );
+            for thread in process.threads.iter() {
+                threads_node.add_child(Self::proccess_to_nodes(thread, &mut key));
+            }
+            if threads_node.count() > 1 {
+                pnode.add_child(threads_node);
+            }
+            node.add_child(pnode);
         }
         node
     }
@@ -306,8 +287,8 @@ impl Component<Msg, NoUserEvent> for GlobalListener {
     }
 }
 
-pub fn launch_tui(runs: Vec<Run>) {
-    let mut model = Model::new(runs);
+pub fn launch_tui(processes: Vec<Process>) {
+    let mut model = Model::new(processes);
     let _ = model.terminal.enter_alternate_screen();
     let _ = model.terminal.clear_screen();
     let _ = model.terminal.enable_raw_mode();
