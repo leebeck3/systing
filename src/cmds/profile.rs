@@ -7,7 +7,7 @@ use std::thread;
 use std::time::Duration;
 
 use anyhow::Result;
-use chrono::Local;
+use chrono::{DateTime, Local};
 use ctrlc;
 use libbpf_rs::skel::OpenSkel;
 use libbpf_rs::skel::Skel;
@@ -16,7 +16,6 @@ use libbpf_rs::MapCore;
 use libbpf_rs::RingBufferBuilder;
 use libbpf_rs::MapFlags;
 use plain::Plain;
-use strum::IntoEnumIterator;
 
 mod systing {
     include!(concat!(
@@ -29,7 +28,7 @@ pub mod process;
 pub mod tree_view;
 
 use systing::*;
-use process::{Process, ProcessStat, Run, TotalProcessStat};
+use process::Process;
 use crate::ProfileSchedOpts;
 
 unsafe impl Plain for systing::types::task_stat {}
@@ -37,78 +36,6 @@ unsafe impl Plain for systing::types::preempt_event {}
 
 // Maximum number of nanoseconds in a day.
 const MAXNSECS: u64 = 86_400_000_000_000;
-
-fn dump_all_results(runs: Vec<Run>) -> Result<()> {
-    for run in runs {
-        println!("Run started at {}", run.start_time.format("%Y-%m-%d %H:%M:%S"));
-        for process in run.processes.iter() {
-            print!("{} pid {} cgid {}", process.comm, process.pid, process.cgid);
-            for stat in ProcessStat::iter() {
-                print!(" {}", process.stat_str(stat));
-            }
-
-            println!("");
-
-            for pevent in process.preempt_events.iter() {
-                println!(
-                    "  Preempted by {} pid {} tgid {} cgid {} times {}",
-                    pevent.comm, pevent.preempt_pid, pevent.preempt_tgid, pevent.cgid, pevent.count
-                );
-            }
-            for thread in process.threads.iter() {
-                print!("\t{} pid {} cgid {}", thread.comm, thread.pid, thread.cgid);
-
-                for stat in ProcessStat::iter() {
-                    print!(" {}", thread.stat_str(stat));
-                }
-                println!("");
-                for pevent in thread.preempt_events.iter() {
-                    println!(
-                        "\t  Preempted by {} pid {} tgid {} cgid {} times {}",
-                        pevent.comm,
-                        pevent.preempt_pid,
-                        pevent.preempt_tgid,
-                        pevent.cgid,
-                        pevent.count
-                    );
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-fn summarize_results(runs: Vec<Run>) -> Result<()> {
-    for run in runs {
-        println!("Run started at {}", run.start_time.format("%Y-%m-%d %H:%M:%S"));
-        for process in run.processes.iter() {
-            let total_threads = process.threads.len();
-            let mut pevents = Vec::new();
-
-            for thread in process.threads.iter() {
-                pevents.extend(&thread.preempt_events);
-            }
-            pevents.extend(&process.preempt_events);
-
-            print!(
-                "{} pid {} cgid {} threads {}",
-                process.comm, process.pid, process.cgid, total_threads
-            );
-            for stat in TotalProcessStat::iter() {
-                print!(" {}", process.total_stat_str(stat));
-            }
-            println!("");
-            pevents.sort_by(|a, b| b.count.cmp(&a.count));
-            for pevent in pevents.iter() {
-                println!(
-                    "\tPreempted by {} pid {} tgid {} times {}",
-                    pevent.comm, pevent.preempt_pid, pevent.preempt_tgid, pevent.count
-                );
-            }
-        }
-    }
-    Ok(())
-}
 
 fn sanitize_stat(stat: &mut systing::types::task_stat) -> Result<()> {
     if stat.run_time > MAXNSECS {
@@ -148,10 +75,10 @@ fn sanitize_stat(stat: &mut systing::types::task_stat) -> Result<()> {
 
 fn collect_results(
     skel: &SystingProfileSkel,
+    start: DateTime<Local>,
+    processes: &mut HashMap<u32, Process>,
     preempt_events: Vec<systing::types::preempt_event>,
-) -> Result<Run> {
-    let mut processes = HashMap::new();
-    let mut threads: HashMap<u32, Vec<Process>> = HashMap::new();
+) -> Result<()> {
     let results = skel.maps.stats.lookup_and_delete_batch(1024, MapFlags::ANY, MapFlags::ANY)?;
     for (rawkey, rawvalue) in results {
         let mut key: u64 = 0;
@@ -162,63 +89,27 @@ fn collect_results(
         plain::copy_from_bytes(&mut value, rawvalue.as_slice()).expect("Data buffer was too short");
         sanitize_stat(&mut value)?;
 
-        if pid == tgid {
-            // This is the tg leader, insert it and carry on.
-            let mut process = Process::with_event(pid, value);
-
-            // If we found threads before we found the process we need to add them to our process
-            // now.
-            match threads.remove(&pid) {
-                Some(mut thread_vec) => loop {
-                    match thread_vec.pop() {
-                        Some(thread) => {
-                            process.add_thread(thread);
-                        }
-                        None => break,
-                    }
-                },
-                None => {}
-            }
-            processes.insert(pid, process);
-        } else {
-            let process = Process::with_event(pid, value);
-            match processes.get_mut(&tgid) {
-                Some(leader) => {
-                    leader.add_thread(process);
+        let process = match processes.get_mut(&tgid) {
+            Some(process) => {
+                if tgid != pid {
+                    let thread = Process::new(pid);
+                    process.add_thread(thread);
                 }
-                None => match threads.get_mut(&tgid) {
-                    Some(thread_vec) => {
-                        thread_vec.push(process);
-                    }
-                    None => {
-                        let mut thread_vec: Vec<Process> = Vec::new();
-                        thread_vec.push(process);
-                        threads.insert(tgid, thread_vec);
-                    }
-                },
-            }
-        }
-    }
-
-    // We may have never seen the process leader, so go through the threads hashmap and create a
-    // process for the leader.
-    for (tgid, thread_vec) in threads {
-        match processes.get_mut(&tgid) {
-            // Shouldn't happened, but *waves hand at the code*, we all know I don't know what I'm
-            // doing.
-            Some(leader) => {
-                for thread in thread_vec {
-                    leader.add_thread(thread);
-                }
+                process
             }
             None => {
                 let mut process = Process::new(tgid);
-                for thread in thread_vec {
+                if tgid != pid {
+                    let thread = Process::new(pid);
                     process.add_thread(thread);
                 }
                 processes.insert(tgid, process);
+                processes.get_mut(&tgid).unwrap()
             }
-        }
+        };
+
+        process.add_run(pid, start, &value);
+        process.update_comm(pid, value);
     }
 
     // Now we need to go through the preempt events and add them to the process or thread.
@@ -231,30 +122,7 @@ fn collect_results(
             None => {}
         }
     }
-
-    let mut process_vec: Vec<Process> = processes.into_iter().map(|(_, v)| v).collect();
-    process_vec.sort_by(|a, b| {
-        let a_total = a.total_potential_runtime();
-        let b_total = b.total_potential_runtime();
-        b_total.cmp(&a_total)
-    });
-
-    for process in process_vec.iter_mut() {
-        process.threads.sort_by(|a, b| {
-            let a_total = a.total_potential_runtime();
-            let b_total = b.total_potential_runtime();
-            b_total.cmp(&a_total)
-        });
-        process.preempt_events.sort_by(|a, b| b.count.cmp(&a.count));
-        for thread in process.threads.iter_mut() {
-            thread.preempt_events.sort_by(|a, b| b.count.cmp(&a.count));
-        }
-    }
-
-    Ok(Run {
-        processes: process_vec,
-        start_time: Local::now(),
-    })
+    Ok(())
 }
 
 pub fn profile_sched(opts: ProfileSchedOpts) -> Result<()> {
@@ -326,8 +194,9 @@ pub fn profile_sched(opts: ProfileSchedOpts) -> Result<()> {
         0
     });
 
-    let mut runs: Vec<Run> = Vec::new();
+    let mut processes: HashMap<u32, Process> = HashMap::new();
     for _ in 0..opts.loops {
+        let start = Local::now();
         // Wait for the duration to expire or for a Ctrl-C signal.
         if opts.duration > 0 {
             thread::sleep(Duration::from_secs(opts.duration));
@@ -339,19 +208,34 @@ pub fn profile_sched(opts: ProfileSchedOpts) -> Result<()> {
             rx.recv().expect("Could not receive signal on channel.");
         }
         let pevents_vec = std::mem::take(&mut *preempt_events.lock().unwrap());
-        let run = collect_results(&skel, pevents_vec)?;
-        runs.push(run);
+        collect_results(&skel, start, &mut processes, pevents_vec)?;
     }
 
     *thread_done.lock().unwrap() = true;
     t.join().expect("Failed to join thread");
 
+    let mut process_vec: Vec<Process> = processes.into_iter().map(|(_, v)| v).collect();
+    process_vec.sort_by(|a, b| {
+        let a_total = a.total_potential_runtime();
+        let b_total = b.total_potential_runtime();
+        b_total.cmp(&a_total)
+    });
+
+    for process in process_vec.iter_mut() {
+        process.sort_runs();
+        process.sort_preempt_events();
+    }
+
     if opts.tui {
-        tree_view::launch_tui(runs);
-    } else if opts.summary {
-        summarize_results(runs)?;
+        tree_view::launch_tui(process_vec);
     } else {
-        dump_all_results(runs)?;
+        for process in process_vec {
+            if opts.summary {
+                process.print_summary();
+            } else {
+                process.print(false);
+            }
+        }
     }
     Ok(())
 }
