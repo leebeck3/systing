@@ -42,6 +42,10 @@ collection periods.  There are several options for outputs
   interactive exploration of the data.
 
 ## Describe
+To use describe ensure you have graphviz installed.
+
+on Debian/Ubuntu
+`sudo apt install graphviz`
 
 This tool can be used to figure out what a process and it's threads are doing in
 relation to each other and their usage pattern.  It tracks kernel and userspace
