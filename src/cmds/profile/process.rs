@@ -93,6 +93,17 @@ impl Process {
         }
     }
 
+    pub fn sort_threads(&mut self) {
+        self.threads.sort_by(|a, b| {
+            let a_total = a.total_potential_runtime();
+            let b_total = b.total_potential_runtime();
+            b_total.cmp(&a_total)
+        });
+        for thread in self.threads.iter_mut() {
+            thread.sort_threads();
+        }
+    }
+
     pub fn sort_preempt_events(&mut self) {
         for run in self.runs.iter_mut() {
             run.sort_preempt_events();
