@@ -4,9 +4,29 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <string.h>
+#include <errno.h>
 
 #define EVENT_SIZE (sizeof(struct inotify_event))
 #define EVENT_BUF_LEN (1024 * (EVENT_SIZE + 16))
+
+// Function to get process information for a given PID
+void log_process_info(pid_t pid) {
+    char proc_path[PATH_MAX];
+    char exe_path[PATH_MAX];
+    ssize_t len;
+
+    // Construct the path to the process's exe link
+    snprintf(proc_path, sizeof(proc_path), "/proc/%d/exe", pid);
+
+    // Resolve the symbolic link to get the binary location
+    len = readlink(proc_path, exe_path, sizeof(exe_path) - 1);
+    if (len != -1) {
+        exe_path[len] = '\0';  // Null-terminate the path
+        printf("Process ID: %d, Executable: %s\n", pid, exe_path);
+    } else {
+        printf("Process ID: %d, Unable to determine executable (error: %s)\n", pid, strerror(errno));
+    }
+}
 
 // Function to interpret and display the event mask
 void print_event_mask(uint32_t mask) {
@@ -23,10 +43,6 @@ void print_event_mask(uint32_t mask) {
     if (mask & IN_MOVED_FROM)     printf("IN_MOVED_FROM ");
     if (mask & IN_MOVED_TO)       printf("IN_MOVED_TO ");
     if (mask & IN_OPEN)           printf("IN_OPEN ");
-    if (mask & IN_IGNORED)        printf("IN_IGNORED ");
-    if (mask & IN_ISDIR)          printf("IN_ISDIR ");
-    if (mask & IN_Q_OVERFLOW)     printf("IN_Q_OVERFLOW ");
-    if (mask & IN_UNMOUNT)        printf("IN_UNMOUNT ");
     printf("\n");
 }
 
@@ -44,6 +60,11 @@ void handle_event(const char *path_to_watch, struct inotify_event *event) {
 
     // Print event mask details
     print_event_mask(event->mask);
+
+    // Log current process info (for demonstration purposes, logs only the monitor process)
+    pid_t pid = getppid();
+    printf("Triggered by:\n");
+    log_process_info(pid);
 }
 
 int main(int argc, char *argv[]) {
@@ -67,7 +88,7 @@ int main(int argc, char *argv[]) {
     watch_descriptor = inotify_add_watch(fd, path_to_watch,
         IN_ACCESS | IN_ATTRIB | IN_CLOSE_WRITE | IN_CLOSE_NOWRITE | IN_CREATE |
         IN_DELETE | IN_DELETE_SELF | IN_MODIFY | IN_MOVE_SELF | IN_MOVED_FROM |
-        IN_MOVED_TO | IN_OPEN | IN_IGNORED | IN_ISDIR | IN_Q_OVERFLOW | IN_UNMOUNT);
+        IN_MOVED_TO | IN_OPEN);
     if (watch_descriptor == -1) {
         perror("inotify_add_watch");
         close(fd);
