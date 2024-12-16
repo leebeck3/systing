@@ -127,17 +127,18 @@ impl Model {
         }
         pnode.add_child(pstat);
 
-        let mut threads_node = Node::new(
-            format!("threads_{}", process.pid),
-            format!("Threads: {}", process.threads.len()).to_string(),
-        );
-        for thread in process.threads.iter() {
-            threads_node.add_child(Node::new(
-                format!("thread_{}_{}", process.pid, thread.pid),
-                format!("{} ({})", thread.comm, thread.pid).to_string(),
-            ));
-        }
-        if threads_node.count() > 1 {
+        let threads = process.sorted_threads();
+        if threads.len() > 1 {
+            let mut threads_node = Node::new(
+                format!("threads_{}", process.pid),
+                format!("Threads: {}", threads.len()).to_string(),
+            );
+            for thread in threads.iter() {
+                threads_node.add_child(Node::new(
+                    format!("thread_{}_{}", process.pid, thread.pid),
+                    format!("{} ({})", thread.comm, thread.pid).to_string(),
+                ));
+            }
             pnode.add_child(threads_node);
         }
 
@@ -250,8 +251,8 @@ impl Update<Msg> for Model {
                         if let Some(node) = self.tree.root_mut().query_mut(&key) {
                             node.clear();
                             if let Some(thread) = self.process_vec.iter().find(|p| p.pid == pid) {
-                                if let Some(thread) = thread.threads.iter().find(|t| t.pid == tid) {
-                                    Self::process_to_nodes(node, thread)
+                                if let Some(thread) = thread.threads.get(&tid) {
+                                    Self::process_to_nodes(node, thread);
                                 }
                             }
                         }

@@ -223,7 +223,6 @@ pub fn profile_sched(opts: ProfileSchedOpts) -> Result<()> {
 
     for process in process_vec.iter_mut() {
         process.sort_runs();
-        process.sort_threads();
         process.sort_preempt_events();
     }
 
