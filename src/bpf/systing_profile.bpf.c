@@ -138,6 +138,8 @@ int trace_enqueue(struct task_struct *tsk, u32 state, bool preempt)
 		return 0;
 	if (tool_config.tgid && tsk->tgid != tool_config.tgid)
 		return 0;
+	if (tsk->tgid == 0)
+		return 0;
 	if (tool_config.filter_cgroup) {
 		u64 cgid = task_cg_id(tsk);
 		if (bpf_map_lookup_elem(&cgroups, &cgid) == NULL)
@@ -219,6 +221,8 @@ int trace_irq_enter(void)
 	if (bpf_map_lookup_elem(&ignore_pids, &tgid))
 		return 0;
 	if (tool_config.tgid && tsk->tgid != tool_config.tgid)
+		return 0;
+	if (tsk->tgid == 0)
 		return 0;
 	if (tool_config.filter_cgroup) {
 		u64 cgid = task_cg_id(tsk);

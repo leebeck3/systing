@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::ffi::CStr;
 use std::fmt;
 
@@ -39,6 +40,7 @@ pub enum TotalProcessStat {
     TotalWakingTime,
 }
 
+#[derive(Debug, Clone)]
 pub struct PreemptEvent {
     pub preempt_pid: u32,
     pub preempt_tgid: u32,
@@ -47,6 +49,7 @@ pub struct PreemptEvent {
     pub count: u64,
 }
 
+#[derive(Debug, Clone)]
 pub struct RunStats {
     pub start_time: DateTime<Local>,
     pub preempt_events: Vec<PreemptEvent>,
@@ -65,11 +68,12 @@ pub struct RunStats {
     total_potential_runtime: u64,
 }
 
+#[derive(Debug, Clone)]
 pub struct Process {
     pub pid: u32,
     pub comm: String,
     pub cgid: u64,
-    pub threads: Vec<Process>,
+    pub threads: HashMap<u32, Process>,
     pub runs: Vec<RunStats>,
     total_potential_runtime: u64,
 }
@@ -81,23 +85,36 @@ impl Process {
             comm: String::new(),
             cgid: 0,
             runs: Vec::new(),
-            threads: Vec::new(),
+            threads: HashMap::new(),
             total_potential_runtime: 0,
         }
     }
 
     pub fn sort_runs(&mut self) {
         self.runs.sort_by(|a, b| a.start_time.cmp(&b.start_time));
-        for thread in self.threads.iter_mut() {
+        for (_, thread) in self.threads.iter_mut() {
             thread.sort_runs();
         }
+    }
+
+    pub fn sorted_threads(&self) -> Vec<Process> {
+        let mut threads = Vec::new();
+        for (_, thread) in self.threads.iter() {
+            threads.push(thread.clone());
+        }
+        threads.sort_by(|a, b| {
+            let a_total = a.total_potential_runtime();
+            let b_total = b.total_potential_runtime();
+            b_total.cmp(&a_total)
+        });
+        threads
     }
 
     pub fn sort_preempt_events(&mut self) {
         for run in self.runs.iter_mut() {
             run.sort_preempt_events();
         }
-        for thread in self.threads.iter_mut() {
+        for (_, thread) in self.threads.iter_mut() {
             thread.sort_preempt_events();
         }
     }
@@ -119,7 +136,8 @@ impl Process {
         );
         for r in self.runs.iter() {
             let mut pevents = Vec::new();
-            for thread in self.threads.iter() {
+            let threads = self.sorted_threads();
+            for thread in threads.iter() {
                 for run in thread.runs.iter() {
                     if run.start_time == r.start_time {
                         pevents.extend(&run.preempt_events);
@@ -164,7 +182,7 @@ impl Process {
                     indent, event.comm, event.preempt_pid, event.count
                 );
             }
-            for thread in self.threads.iter() {
+            for thread in self.sorted_threads() {
                 thread.print(true);
             }
         }
@@ -210,16 +228,17 @@ impl Process {
         }
 
         if pid != self.pid {
-            for thread in self.threads.iter_mut() {
-                if thread.pid == pid {
-                    thread.add_run(pid, start_time, event);
-                }
+            if let Some(thread) = self.threads.get_mut(&pid) {
+                thread.add_run(pid, start_time, event);
             }
         }
     }
 
     pub fn add_thread(&mut self, thread: Process) {
-        self.threads.push(thread);
+        if self.threads.contains_key(&thread.pid) {
+            return;
+        }
+        self.threads.insert(thread.pid, thread);
     }
 
     pub fn add_preempt_event(&mut self, event: &systing::types::preempt_event) {
@@ -228,11 +247,8 @@ impl Process {
             let last_run = self.runs.last_mut().unwrap();
             last_run.add_preempt_event(event);
         } else {
-            for thread in self.threads.iter_mut() {
-                if thread.pid == pid {
-                    thread.add_preempt_event(event);
-                    break;
-                }
+            if let Some(thread) = self.threads.get_mut(&pid) {
+                thread.add_preempt_event(event);
             }
         }
     }
@@ -253,13 +269,11 @@ impl Process {
             }
             self.comm = Process::get_comm(pid, stat);
         } else {
-            for thread in self.threads.iter_mut() {
-                if thread.pid == pid {
-                    if thread.comm.len() != 0 {
-                        return;
-                    }
-                    thread.comm = Process::get_comm(pid, stat);
+            if let Some(thread) = self.threads.get_mut(&pid) {
+                if thread.comm.len() != 0 {
+                    return;
                 }
+                thread.comm = Process::get_comm(pid, stat);
             }
         }
     }
